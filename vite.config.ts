@@ -1,0 +1,53 @@
+import { defineConfig, type Plugin, type PreviewServer, type ViteDevServer } from "vite"
+import react from "@vitejs/plugin-react"
+import tailwindcss from "@tailwindcss/vite"
+import path from "node:path"
+import { getGithubDashboard } from "./server/github-dashboard"
+
+function installGithubDashboardApi(server: ViteDevServer | PreviewServer) {
+  server.middlewares.use("/api/dashboard", async (req, res, next) => {
+    if (req.method !== "GET") {
+      next()
+      return
+    }
+
+    try {
+      const url = new URL(req.url ?? "/", "http://localhost")
+      const payload = await getGithubDashboard({
+        force: url.searchParams.get("refresh") === "1",
+        quick: url.searchParams.get("quick") === "1",
+        scanLimit: Number(url.searchParams.get("scanLimit") ?? 24),
+      })
+
+      res.statusCode = 200
+      res.setHeader("Content-Type", "application/json; charset=utf-8")
+      res.end(JSON.stringify(payload))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Dashboard request failed."
+      res.statusCode = 500
+      res.setHeader("Content-Type", "application/json; charset=utf-8")
+      res.end(JSON.stringify({ message }))
+    }
+  })
+}
+
+function githubDashboardApi(): Plugin {
+  return {
+    name: "github-dashboard-api",
+    configureServer(server: ViteDevServer) {
+      installGithubDashboardApi(server)
+    },
+    configurePreviewServer(server: PreviewServer) {
+      installGithubDashboardApi(server)
+    },
+  }
+}
+
+export default defineConfig({
+  plugins: [react(), tailwindcss(), githubDashboardApi()],
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+    },
+  },
+})
