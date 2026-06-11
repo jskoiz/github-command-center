@@ -43,7 +43,13 @@ Open [http://127.0.0.1:5173](http://127.0.0.1:5173).
 npm run check
 ```
 
-This runs lint first, then a production build.
+This runs lint, an artifact-free TypeScript check, tests, then a production
+build. For faster local loops:
+
+```sh
+npm run typecheck
+npm run test
+```
 
 Preview the built app locally:
 
@@ -59,11 +65,22 @@ preview command can still fetch live GitHub data.
 
 - The local API uses `gh api` through `server/github-dashboard.ts`.
 - The server keeps a short in-memory cache while the dev/preview process runs.
-- The browser stores the latest full dashboard payload in `localStorage`.
-- Cached browser data is considered fresh for 10 minutes.
-- A normal reload renders fresh cached data immediately and skips the API.
+- Cold starts first request a bounded quick payload, then load full details in
+  the background.
+- Quick payloads fetch only the first scanned repo page and defer billing until
+  the full dashboard response.
+- Workflow-run scans default to the 24 most recently pushed repositories. The
+  `scanLimit` API parameter is clamped to 8-60.
+- Latest commit and latest pull request fields are fetched per repo, cached in
+  `.cache/github-command-center/repo-details.json`, and refreshed at most once
+  per day for repos active in the last week. Inactive repos reuse cached details
+  when available and otherwise skip those extra API calls.
+- The browser stores the latest full dashboard payload in session-scoped storage.
+- Cached browser data is considered fresh for 10 minutes within that browser session.
+- A normal reload in the same session renders fresh cached data immediately and skips the API.
 - A stale reload renders cached data immediately, then refreshes in the background.
 - The Refresh button forces a new API pull and updates the browser cache.
+- UI preferences such as repository columns may persist in `localStorage`.
 
 ## Current Scope
 

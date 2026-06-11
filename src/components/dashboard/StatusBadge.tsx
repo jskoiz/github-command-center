@@ -1,33 +1,8 @@
 import { Badge } from "@/components/ui/badge"
 import { CheckCircle2Icon, CircleDotIcon, Clock3Icon, LoaderCircleIcon, XCircleIcon } from "lucide-react"
 
+import { classifyGithubStatus, type GithubStatusTone } from "@/lib/github-status"
 import { cn } from "@/lib/utils"
-
-type StatusTone = "success" | "danger" | "warning" | "running" | "neutral"
-
-const STATUS_LABELS: Record<string, string> = {
-  SUCCESS: "passing",
-  success: "passing",
-  FAILURE: "failing",
-  failure: "failing",
-  TIMED_OUT: "timed out",
-  timed_out: "timed out",
-  CANCELLED: "cancelled",
-  cancelled: "cancelled",
-  ACTION_REQUIRED: "action required",
-  action_required: "action required",
-  IN_PROGRESS: "running",
-  in_progress: "running",
-  QUEUED: "queued",
-  queued: "queued",
-  REQUESTED: "queued",
-  requested: "queued",
-  WAITING: "waiting",
-  waiting: "waiting",
-  PENDING: "pending",
-  pending: "pending",
-  completed: "completed",
-}
 
 export function StatusBadge({
   state,
@@ -40,8 +15,7 @@ export function StatusBadge({
   compact?: boolean
   className?: string
 }) {
-  const label = state ? STATUS_LABELS[state] ?? state.toLowerCase().replaceAll("_", " ") : fallback
-  const tone = getTone(state)
+  const { label, tone } = classifyGithubStatus(state, fallback)
 
   if (compact) {
     return (
@@ -49,7 +23,7 @@ export function StatusBadge({
         variant={tone === "danger" ? "destructive" : "outline"}
         aria-label={label}
         title={label}
-        className={cn("h-6 w-6 rounded-full px-0", toneClassName(tone), className)}
+        className={cn("size-5 rounded-full px-0 [&>svg]:size-3.5", toneClassName(tone), className)}
       >
         {renderCompactIcon(tone)}
         <span className="sr-only">{label}</span>
@@ -68,17 +42,7 @@ export function StatusBadge({
   )
 }
 
-function getTone(state: string | null | undefined): StatusTone {
-  const normalized = state?.toLowerCase()
-  if (!normalized) return "neutral"
-  if (normalized === "success") return "success"
-  if (["failure", "timed_out", "cancelled", "action_required"].includes(normalized)) return "danger"
-  if (["queued", "requested", "waiting", "pending"].includes(normalized)) return "warning"
-  if (normalized === "in_progress") return "running"
-  return "neutral"
-}
-
-function toneClassName(tone: StatusTone): string {
+function toneClassName(tone: GithubStatusTone): string {
   if (tone === "success") return "border-status-success/25 bg-status-success/10 text-status-success"
   if (tone === "danger") return "border-destructive/25"
   if (tone === "warning") return "border-status-warning/25 bg-status-warning/10 text-status-warning"
@@ -86,7 +50,7 @@ function toneClassName(tone: StatusTone): string {
   return "text-muted-foreground"
 }
 
-function renderCompactIcon(tone: StatusTone) {
+function renderCompactIcon(tone: GithubStatusTone) {
   if (tone === "success") return <CheckCircle2Icon className="size-4" aria-hidden="true" />
   if (tone === "danger") return <XCircleIcon className="size-4" aria-hidden="true" />
   if (tone === "warning") return <Clock3Icon className="size-4" aria-hidden="true" />

@@ -3,11 +3,19 @@ import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import path from "node:path"
 import { getGithubDashboard } from "./server/github-dashboard"
+import { isLocalDashboardRequest, LOCAL_DASHBOARD_ONLY_MESSAGE } from "./server/local-access"
 
 function installGithubDashboardApi(server: ViteDevServer | PreviewServer) {
   server.middlewares.use("/api/dashboard", async (req, res, next) => {
     if (req.method !== "GET") {
       next()
+      return
+    }
+
+    if (!isLocalDashboardRequest(req)) {
+      res.statusCode = 403
+      res.setHeader("Content-Type", "application/json; charset=utf-8")
+      res.end(JSON.stringify({ message: LOCAL_DASHBOARD_ONLY_MESSAGE }))
       return
     }
 

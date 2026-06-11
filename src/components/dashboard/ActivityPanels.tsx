@@ -35,6 +35,8 @@ export function ActivityPanels({
       <Panel title="Recent Commits" icon={GitCommitHorizontalIcon} href="https://github.com/dashboard-feed">
         {isUpdating && commits.length === 0 ? (
           <UpdatingLabel />
+        ) : commits.length === 0 ? (
+          <EmptyPanelMessage>No recent commits</EmptyPanelMessage>
         ) : (
           commits.slice(0, PANEL_ITEM_LIMIT).map((commit) => (
             <a
@@ -42,7 +44,7 @@ export function ActivityPanels({
               href={commit.url}
               target="_blank"
               rel="noreferrer"
-              className="grid min-h-9 grid-cols-[1fr_auto] items-center gap-2 rounded-md py-1 hover:text-foreground"
+              className="grid min-h-9 grid-cols-[1fr_auto] items-center gap-2 rounded-md px-1.5 py-1 outline-none transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               <span className="min-w-0">
                 <span className="block truncate font-medium leading-4">{commit.message}</span>
@@ -60,6 +62,8 @@ export function ActivityPanels({
       <Panel title="Pull Requests" icon={GitPullRequestIcon} href="https://github.com/pulls">
         {isUpdating && pullRequests.length === 0 ? (
           <UpdatingLabel />
+        ) : pullRequests.length === 0 ? (
+          <EmptyPanelMessage>No recent pull requests</EmptyPanelMessage>
         ) : (
           pullRequests.slice(0, PANEL_ITEM_LIMIT).map((item) => (
             <IssueRow key={item.id} item={item} icon={GitPullRequestIcon} />
@@ -69,6 +73,8 @@ export function ActivityPanels({
       <Panel title="Issues" icon={CircleDotIcon} href="https://github.com/issues">
         {isUpdating && issues.length === 0 ? (
           <UpdatingLabel />
+        ) : issues.length === 0 ? (
+          <EmptyPanelMessage>No recent issues</EmptyPanelMessage>
         ) : (
           issues.slice(0, PANEL_ITEM_LIMIT).map((item) => (
             <IssueRow key={item.id} item={item} icon={CircleDotIcon} />
@@ -91,9 +97,9 @@ function Panel({
   children: ReactNode
 }) {
   return (
-    <Card className="h-48 min-h-0 gap-0 rounded-lg py-0 lg:h-full" size="sm">
-      <CardHeader className="items-center border-b px-3 py-1 [.border-b]:pb-1">
-        <CardTitle className="flex items-center gap-1.5 text-xs leading-none">
+    <Card className="h-48 min-h-0 gap-0 rounded-lg py-0 shadow-sm shadow-foreground/[0.02] lg:h-full" size="sm">
+      <CardHeader className="min-h-9 items-center border-b px-3 py-1.5 [.border-b]:pb-1.5">
+        <CardTitle className="flex items-center gap-1.5 text-xs leading-none font-semibold">
           <Icon className="size-3.5 text-muted-foreground" aria-hidden="true" />
           {title}
         </CardTitle>
@@ -106,7 +112,7 @@ function Panel({
           </Button>
         </CardAction>
       </CardHeader>
-      <CardContent className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-3 py-1 text-xs">
+      <CardContent className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 py-1.5 text-xs [scrollbar-gutter:stable]">
         {children}
       </CardContent>
     </Card>
@@ -125,7 +131,7 @@ function IssueRow({
       href={item.url}
       target="_blank"
       rel="noreferrer"
-      className="grid min-h-9 grid-cols-[auto_1fr_auto] items-center gap-2 rounded-md py-1 hover:text-foreground"
+      className="group grid min-h-9 grid-cols-[auto_1fr_auto] items-center gap-2 rounded-md px-1.5 py-1 outline-none transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
     >
       <Icon className="size-3.5 text-muted-foreground" aria-hidden="true" />
       <span className="min-w-0">
@@ -134,11 +140,15 @@ function IssueRow({
           {shortRepoName(item.repo)}#{item.number} · {formatRelative(item.updatedAt)}
         </span>
       </span>
-      <ExternalLinkIcon className="size-3 text-muted-foreground" aria-hidden="true" />
+      <ExternalLinkIcon className="size-3 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" aria-hidden="true" />
     </a>
   )
 }
 
 function UpdatingLabel() {
-  return <div className="py-3 text-xs text-muted-foreground">Updating details...</div>
+  return <div className="rounded-md bg-muted/40 px-2 py-3 text-xs text-muted-foreground">Updating details...</div>
+}
+
+function EmptyPanelMessage({ children }: { children: ReactNode }) {
+  return <div className="rounded-md bg-muted/30 px-2 py-3 text-xs text-muted-foreground">{children}</div>
 }

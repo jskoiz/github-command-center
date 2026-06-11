@@ -27,16 +27,15 @@ import {
 import {
   TooltipProvider,
 } from "@/components/ui/tooltip"
+import {
+  isDashboardCacheFresh,
+  readDashboardCache,
+  type DashboardCacheEntry,
+  writeDashboardCache,
+} from "@/lib/dashboard-cache"
 import { formatRelative } from "@/lib/format"
-import type { CommitSummary, DashboardPayload, IssueSummary, RepoSummary } from "@/types/github"
-
-const DASHBOARD_CACHE_KEY = "github-command-center:dashboard-cache:v1"
-const DASHBOARD_CACHE_MAX_AGE_MS = 10 * 60 * 1000
-
-type DashboardCacheEntry = {
-  cachedAt: number
-  payload: DashboardPayload
-}
+import { classifyGithubStatus, isGithubStatusFailure } from "@/lib/github-status"
+import type { DashboardPayload, RepoSummary } from "@/types/github"
 
 function App() {
   const [initialDashboardCache] = useState<DashboardCacheEntry | null>(() => readDashboardCache())
@@ -77,9 +76,10 @@ function App() {
 
   useEffect(() => {
     let cancelled = false
+    const controller = new AbortController()
 
     async function fetchDashboard(path: string) {
-      const response = await fetch(path)
+      const response = await fetch(path, { signal: controller.signal })
       if (!response.ok) {
         throw new Error(`Dashboard API returned ${response.status}`)
       }
@@ -105,7 +105,7 @@ function App() {
             writeDashboardCache(payload)
           }
         } catch (requestError) {
-          if (!cancelled) {
+          if (!cancelled && !isAbortError(requestError)) {
             setError(requestError instanceof Error ? requestError.message : "Dashboard request failed.")
           }
         } finally {
@@ -118,7 +118,7 @@ function App() {
         const payload = await fetchDashboard("/api/dashboard?quick=1")
         if (!cancelled) setData(payload)
       } catch (requestError) {
-        if (!cancelled) {
+        if (!cancelled && !isAbortError(requestError)) {
           setError(requestError instanceof Error ? requestError.message : "Dashboard request failed.")
         }
       } finally {
@@ -133,7 +133,7 @@ function App() {
           writeDashboardCache(payload)
         }
       } catch (requestError) {
-        if (!cancelled) {
+        if (!cancelled && !isAbortError(requestError)) {
           setError(requestError instanceof Error ? requestError.message : "Dashboard request failed.")
         }
       } finally {
@@ -145,6 +145,7 @@ function App() {
 
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [initialDashboardCache])
 
@@ -153,14 +154,6 @@ function App() {
     return [...new Set(data.repos.map((repo) => repo.language).filter((value): value is string => Boolean(value)))]
       .sort((a, b) => a.localeCompare(b))
   }, [data])
-
-  const latestCommitByRepo = useMemo(() => {
-    return latestItemByRepo(data?.recentCommits ?? [], (item) => item.repo, (item) => item.date)
-  }, [data?.recentCommits])
-
-  const latestPullRequestByRepo = useMemo(() => {
-    return latestItemByRepo(data?.pullRequests ?? [], (item) => item.repo, (item) => item.updatedAt)
-  }, [data?.pullRequests])
 
   const filteredRepos = useMemo(() => {
     if (!data) return []
@@ -175,9 +168,9 @@ function App() {
       })
       .filter((repo) => visibility === "all" || repo.visibility === visibility)
       .filter((repo) => language === "all" || repo.language === language)
-      .filter((repo) => ciState === "all" || getRepoState(repo) === ciState)
-      .sort((a, b) => compareRepos(a, b, sort, latestCommitByRepo, latestPullRequestByRepo))
-  }, [ciState, data, language, latestCommitByRepo, latestPullRequestByRepo, query, sort, visibility])
+      .filter((repo) => ciState === "all" || getRepoCiState(repo) === ciState)
+      .sort((a, b) => compareRepos(a, b, sort))
+  }, [ciState, data, language, query, sort, visibility])
 
   const safePageIndex = Math.min(pageIndex, Math.max(0, Math.ceil(filteredRepos.length / pageSize) - 1))
   const pagedRepos = useMemo(() => {
@@ -240,27 +233,25 @@ function App() {
             {data ? (
               <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px] 2xl:grid-cols-[minmax(0,1fr)_340px]">
                 <div className="grid min-h-0 gap-3 lg:grid-rows-[minmax(0,1fr)_190px]">
-                      <RepoTable
-                        repos={pagedRepos}
-                        totalCount={data.repos.length}
-                        filteredCount={filteredRepos.length}
-                        pageIndex={safePageIndex}
-                        pageSize={pageSize}
-                        sort={sort}
-                        viewerLogin={data.viewer.login}
-                        latestCommitByRepo={latestCommitByRepo}
-                        latestPullRequestByRepo={latestPullRequestByRepo}
-                        onPageChange={setPageIndex}
-                        onPageSizeChange={handlePageSizeChange}
-                        onSort={handleSort}
-                      />
-                      <ActivityPanels
-                        commits={data.recentCommits}
-                        pullRequests={data.pullRequests}
-                        issues={data.issues}
-                        isUpdating={data.detailLevel === "quick"}
-                      />
-                    </div>
+                  <RepoTable
+                    repos={pagedRepos}
+                    totalCount={data.repos.length}
+                    filteredCount={filteredRepos.length}
+                    pageIndex={safePageIndex}
+                    pageSize={pageSize}
+                    sort={sort}
+                    viewerLogin={data.viewer.login}
+                    onPageChange={setPageIndex}
+                    onPageSizeChange={handlePageSizeChange}
+                    onSort={handleSort}
+                  />
+                  <ActivityPanels
+                    commits={data.recentCommits}
+                    pullRequests={data.pullRequests}
+                    issues={data.issues}
+                    isUpdating={data.detailLevel === "quick"}
+                  />
+                </div>
                   <OperationalRail
                     billing={data.billing}
                     detailLevel={data.detailLevel}
@@ -268,7 +259,7 @@ function App() {
                     repos={data.repos}
                     warnings={data.warnings}
                   />
-                </div>
+              </div>
             ) : null}
           </div>
         </main>
@@ -307,23 +298,23 @@ function Header({
   onRefresh: () => void
 }) {
   return (
-    <header className="sticky top-0 z-20 border-b bg-background/95 backdrop-blur">
-      <div className="flex min-h-14 flex-col gap-2 p-2 lg:flex-row lg:items-center lg:justify-between lg:px-3">
-        <div className="flex min-w-0 items-center gap-3">
+    <header className="sticky top-0 z-20 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/85">
+      <div className="flex min-h-14 flex-col gap-2 px-2 py-2 sm:px-3 lg:h-14 lg:flex-row lg:items-center lg:justify-between lg:py-0">
+        <div className="flex min-w-0 items-center gap-2.5">
           <a href="#repos" className="flex shrink-0 items-center gap-2" aria-label="GitHub Home">
             <SiGithub className="size-7 text-foreground" aria-hidden="true" />
-            <span className="text-lg font-semibold">{data?.viewer.login ?? "jskoiz"}</span>
+            <span className="text-lg font-semibold leading-none">{data?.viewer.login ?? "jskoiz"}</span>
           </a>
           <HeaderStats data={data} />
         </div>
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <div className="relative min-w-48 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col gap-2 md:flex-row md:items-center lg:max-w-[820px] xl:max-w-none">
+          <div className="relative min-w-0 flex-1 md:min-w-48">
             <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
             <Input
               value={query}
               onChange={(event) => onQueryChange(event.target.value)}
               placeholder="Search repositories..."
-              className="h-8 pl-8"
+              className="h-8 bg-card pl-8"
             />
           </div>
           <HeaderFilters
@@ -336,14 +327,14 @@ function Header({
             onCiStateChange={onCiStateChange}
           />
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={onRefresh} disabled={refreshing}>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button variant="outline" size="default" onClick={onRefresh} disabled={refreshing}>
             <RefreshCcwIcon data-icon="inline-start" />
             {refreshing ? "Refreshing" : "Refresh"}
           </Button>
-          <div className="hidden items-center gap-2 px-2 text-sm text-muted-foreground md:flex">
+          <div className="hidden min-w-0 items-center gap-2 px-1 text-sm text-muted-foreground md:flex">
             <CircleDotIcon className="size-4 text-status-success" aria-hidden="true" />
-            <span>{updatingDetails ? "Updating" : data ? `Refreshed ${formatRelative(data.generatedAt)}` : "Ready"}</span>
+            <span className="truncate">{updatingDetails ? "Updating" : data ? `Refreshed ${formatRelative(data.generatedAt)}` : "Ready"}</span>
           </div>
           <Avatar className="size-8">
             {data?.viewer.avatarUrl ? <AvatarImage src={data.viewer.avatarUrl} alt={data.viewer.login} /> : null}
@@ -360,16 +351,14 @@ function HeaderStats({ data }: { data: DashboardPayload | null }) {
 
   const openPrs = data.repos.reduce((sum, repo) => sum + (repo.openPullRequests ?? 0), 0)
   const openIssues = data.repos.reduce((sum, repo) => sum + (repo.openIssues ?? 0), 0)
-  const failingRuns = data.ciRuns.filter((run) =>
-    ["failure", "timed_out", "cancelled", "action_required"].includes(run.conclusion ?? "")
-  ).length
+  const failingRuns = data.ciRuns.filter((run) => isGithubStatusFailure(run.conclusion ?? run.status)).length
 
   return (
-    <div className="hidden items-center gap-1 2xl:flex">
-      <Badge variant="outline" className="font-mono">{data.repos.length} repos</Badge>
-      <Badge variant="outline" className="font-mono">{openPrs} PRs</Badge>
-      <Badge variant="outline" className="font-mono">{openIssues} issues</Badge>
-      <Badge variant="outline" className="font-mono">{failingRuns} CI</Badge>
+    <div className="hidden items-center gap-1 xl:flex">
+      <Badge variant="outline" className="h-6 px-2 font-mono">{data.repos.length} repos</Badge>
+      <Badge variant="outline" className="h-6 px-2 font-mono">{openPrs} PRs</Badge>
+      <Badge variant="outline" className="h-6 px-2 font-mono">{openIssues} issues</Badge>
+      <Badge variant="outline" className="h-6 px-2 font-mono">{failingRuns} CI</Badge>
     </div>
   )
 }
@@ -392,13 +381,13 @@ function HeaderFilters({
   onCiStateChange: (value: string) => void
 }) {
   return (
-    <div className="hidden shrink-0 items-center gap-1.5 text-sm md:flex">
-      <div className="flex items-center gap-1 px-1 text-muted-foreground">
+    <div className="flex w-full shrink-0 flex-wrap items-center gap-2 text-sm md:w-auto md:flex-nowrap">
+      <div className="hidden items-center gap-1 text-muted-foreground md:flex">
         <SlidersHorizontalIcon className="size-4" aria-hidden="true" />
         <span className="sr-only">Filters</span>
       </div>
       <Select value={visibility} onValueChange={onVisibilityChange}>
-        <SelectTrigger size="sm" className="h-8 w-32">
+        <SelectTrigger size="sm" className="h-8 min-w-32 flex-1 bg-card sm:flex-none md:w-32">
           <SelectValue placeholder="Visibility" />
         </SelectTrigger>
         <SelectContent>
@@ -411,7 +400,7 @@ function HeaderFilters({
         </SelectContent>
       </Select>
       <Select value={language} onValueChange={onLanguageChange}>
-        <SelectTrigger size="sm" className="h-8 w-36">
+        <SelectTrigger size="sm" className="h-8 min-w-36 flex-1 bg-card sm:flex-none md:w-36">
           <SelectValue placeholder="Language" />
         </SelectTrigger>
         <SelectContent>
@@ -426,7 +415,7 @@ function HeaderFilters({
         </SelectContent>
       </Select>
       <Select value={ciState} onValueChange={onCiStateChange}>
-        <SelectTrigger size="sm" className="h-8 w-24">
+        <SelectTrigger size="sm" className="h-8 min-w-24 flex-1 bg-card sm:flex-none md:w-24">
           <SelectValue placeholder="CI" />
         </SelectTrigger>
         <SelectContent>
@@ -452,24 +441,17 @@ function ErrorPanel({ message }: { message: string }) {
   )
 }
 
-function getRepoState(repo: RepoSummary): string {
-  const value = (repo.latestRun?.conclusion ?? repo.latestRun?.status ?? repo.checkState)?.toLowerCase()
-  if (!value) return "none"
-  if (value === "success") return "success"
-  if (["failure", "timed_out", "cancelled", "action_required"].includes(value)) return "failure"
-  if (["queued", "requested", "waiting", "pending", "in_progress"].includes(value)) return "running"
-  return "none"
+function getRepoCiState(repo: RepoSummary): string {
+  return classifyGithubStatus(repo.latestRun?.conclusion ?? repo.latestRun?.status ?? repo.checkState).rollup
 }
 
 function compareRepos(
   a: RepoSummary,
   b: RepoSummary,
-  sort: RepoSort,
-  latestCommitByRepo: Map<string, CommitSummary>,
-  latestPullRequestByRepo: Map<string, IssueSummary>
+  sort: RepoSort
 ): number {
-  const aValue = getSortValue(a, sort.key, latestCommitByRepo, latestPullRequestByRepo)
-  const bValue = getSortValue(b, sort.key, latestCommitByRepo, latestPullRequestByRepo)
+  const aValue = getSortValue(a, sort.key)
+  const bValue = getSortValue(b, sort.key)
   const direction = sort.direction === "asc" ? 1 : -1
 
   if (typeof aValue === "number" && typeof bValue === "number") {
@@ -481,20 +463,18 @@ function compareRepos(
 
 function getSortValue(
   repo: RepoSummary,
-  key: RepoSortKey,
-  latestCommitByRepo: Map<string, CommitSummary>,
-  latestPullRequestByRepo: Map<string, IssueSummary>
+  key: RepoSortKey
 ): string | number {
   if (key === "pushedAt") return repo.pushedAt ? Date.parse(repo.pushedAt) : 0
   if (key === "updatedAt") return repo.updatedAt ? Date.parse(repo.updatedAt) : 0
-  if (key === "lastCommitAt") return dateSortValue(latestCommitByRepo.get(repo.fullName)?.date)
-  if (key === "lastPullRequestAt") return dateSortValue(latestPullRequestByRepo.get(repo.fullName)?.updatedAt)
+  if (key === "lastCommitAt") return dateSortValue(repo.latestCommit?.date)
+  if (key === "lastPullRequestAt") return dateSortValue(repo.latestPullRequest?.updatedAt)
   if (key === "openPullRequests") return repo.openPullRequests ?? -1
   if (key === "openIssues") return repo.openIssues ?? -1
   if (key === "stars") return repo.stars
   if (key === "forks") return repo.forks
   if (key === "sizeKb") return repo.sizeKb
-  if (key === "checkState") return getRepoState(repo)
+  if (key === "checkState") return getRepoCiState(repo)
   return repo[key] ?? ""
 }
 
@@ -502,55 +482,8 @@ function dateSortValue(value: string | null | undefined) {
   return value ? Date.parse(value) : 0
 }
 
-function latestItemByRepo<T>(
-  items: T[],
-  getRepo: (item: T) => string,
-  getDate: (item: T) => string
-) {
-  const latestByRepo = new Map<string, T>()
-
-  for (const item of items) {
-    const repo = getRepo(item)
-    const current = latestByRepo.get(repo)
-    if (!current || Date.parse(getDate(item)) > Date.parse(getDate(current))) {
-      latestByRepo.set(repo, item)
-    }
-  }
-
-  return latestByRepo
-}
-
-function readDashboardCache(): DashboardCacheEntry | null {
-  if (typeof window === "undefined") return null
-
-  try {
-    const raw = window.localStorage.getItem(DASHBOARD_CACHE_KEY)
-    if (!raw) return null
-
-    const parsed = JSON.parse(raw) as Partial<DashboardCacheEntry>
-    if (!parsed.payload || typeof parsed.cachedAt !== "number") return null
-    if (parsed.payload.detailLevel !== "full") return null
-
-    return {
-      cachedAt: parsed.cachedAt,
-      payload: parsed.payload,
-    }
-  } catch {
-    return null
-  }
-}
-
-function writeDashboardCache(payload: DashboardPayload) {
-  if (typeof window === "undefined" || payload.detailLevel !== "full") return
-
-  window.localStorage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify({
-    cachedAt: Date.now(),
-    payload,
-  }))
-}
-
-function isDashboardCacheFresh(entry: DashboardCacheEntry) {
-  return Date.now() - entry.cachedAt <= DASHBOARD_CACHE_MAX_AGE_MS
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError"
 }
 
 export default App

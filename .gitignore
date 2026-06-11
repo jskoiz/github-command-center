@@ -17,6 +17,7 @@ dist-ssr
 
 # Local app/runtime cache
 .vite
+.cache
 .vercel
 .netlify
 
