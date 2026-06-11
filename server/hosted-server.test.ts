@@ -42,6 +42,7 @@ type FixtureCalls = {
 }
 
 type FixtureOptions = {
+  distDir?: string
   loadDashboard?: HostedServerDependencies["loadDashboard"]
   rateLimiters?: HostedRateLimiters
   revokeOAuthToken?: HostedServerDependencies["revokeOAuthToken"]
@@ -90,7 +91,7 @@ async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
     baseUrl: BASE_URL,
     clientId: "client-id",
     clientSecret: "client-secret",
-    distDir: DIST_DIR,
+    distDir: options.distDir ?? DIST_DIR,
     sessionKey,
     secureCookies: options.secureCookies ?? false,
     trustProxy: options.trustProxy ?? false,
@@ -281,6 +282,16 @@ describe("hosted request handler", () => {
       expect(fixture.calls.staticStats).toEqual([`${DIST_DIR}/index.html`])
       expect(fixture.calls.staticReads).toEqual([`${DIST_DIR}/index.html`])
     })
+  })
+
+  it("normalizes trailing separators in the injected static root", async () => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/")
+
+      expect(response.status).toBe(200)
+      expect(fixture.calls.staticStats).toEqual([`${DIST_DIR}/index.html`])
+      expect(fixture.calls.staticReads).toEqual([`${DIST_DIR}/index.html`])
+    }, { distDir: `${DIST_DIR}/` })
   })
 
   it("falls back to the app shell for unknown SPA paths", async () => {

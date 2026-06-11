@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto"
 import type { IncomingMessage, ServerResponse } from "node:http"
-import { extname, join, normalize, sep } from "node:path"
+import { extname, join, normalize, parse, sep } from "node:path"
 
 import {
   openSession,
@@ -361,10 +361,11 @@ function sendExpiredSession(dependencies: HostedServerDependencies, res: ServerR
 }
 
 async function serveStatic(dependencies: HostedServerDependencies, res: ServerResponse, pathname: string) {
+  const staticRoot = normalizeStaticRoot(dependencies.distDir)
   const requested = pathname === "/" ? "/index.html" : pathname
   const safePath = normalize(requested).replace(/^(\.\.[/\\])+/, "")
-  let filePath = join(dependencies.distDir, safePath)
-  if (filePath !== dependencies.distDir && !filePath.startsWith(dependencies.distDir + sep)) {
+  let filePath = join(staticRoot, safePath)
+  if (filePath !== staticRoot && !filePath.startsWith(staticRoot + sep)) {
     sendJson(res, 403, { message: "Forbidden." })
     return
   }
@@ -374,7 +375,7 @@ async function serveStatic(dependencies: HostedServerDependencies, res: ServerRe
     if (stats.isDirectory()) filePath = join(filePath, "index.html")
   } catch {
     // SPA fallback: unknown paths render the app shell.
-    filePath = join(dependencies.distDir, "index.html")
+    filePath = join(staticRoot, "index.html")
   }
 
   try {
@@ -390,6 +391,14 @@ async function serveStatic(dependencies: HostedServerDependencies, res: ServerRe
   } catch {
     sendJson(res, 404, { message: "Not found. Run `npm run build` before starting the server." })
   }
+}
+
+function normalizeStaticRoot(distDir: string) {
+  const normalized = normalize(distDir)
+  const root = parse(normalized).root
+  let end = normalized.length
+  while (end > root.length && normalized.endsWith(sep, end)) end -= sep.length
+  return normalized.slice(0, end)
 }
 
 function applySecurityHeaders(res: ServerResponse, secureCookies: boolean) {
