@@ -59,6 +59,7 @@ export type IssueSummary = {
   author: string | null
   labels: string[]
   isPullRequest: boolean
+  isDraft?: boolean
 }
 
 export type WorkflowRunSummary = {

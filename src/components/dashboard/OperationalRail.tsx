@@ -1,7 +1,9 @@
-import { AlertTriangleIcon, CircleDollarSignIcon, ExternalLinkIcon, ShieldAlertIcon } from "lucide-react"
+import { useState } from "react"
+import { AlertTriangleIcon, CircleDollarSignIcon, ExternalLinkIcon, ShieldAlertIcon, XIcon } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
@@ -11,37 +13,50 @@ import {
 } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { formatBillingQuantity, formatDuration, formatMoney, formatMonth, formatNumber, formatRelative, shortRepoName } from "@/lib/format"
-import { isGithubStatusFailure, isGithubStatusSuccess } from "@/lib/github-status"
-import type { BillingSummary, DashboardWarning, RepoSummary, WorkflowRunSummary } from "@/types/github"
+import { isGithubStatusFailure } from "@/lib/github-status"
+import type { BillingSummary, DashboardWarning, WorkflowRunSummary } from "@/types/github"
 import { StatusBadge } from "./StatusBadge"
 
 export function OperationalRail({
   billing,
   detailLevel,
   runs,
-  repos,
   warnings,
+  dismissedRunIds,
+  onDismissRun,
+  onRestoreRuns,
 }: {
   billing: BillingSummary
   detailLevel: "quick" | "full"
   runs: WorkflowRunSummary[]
-  repos: RepoSummary[]
   warnings: DashboardWarning[]
+  dismissedRunIds: Set<number>
+  onDismissRun: (id: number) => void
+  onRestoreRuns: () => void
 }) {
   const failingRuns = runs.filter((run) => isGithubStatusFailure(run.conclusion ?? run.status))
 
   return (
     <aside className="flex min-h-0 flex-col gap-3 overflow-y-auto overscroll-contain pr-1 [scrollbar-gutter:stable]">
       <WarningPanel warnings={warnings} />
+      <CiCard
+        runs={failingRuns}
+        isUpdating={detailLevel === "quick"}
+        dismissedRunIds={dismissedRunIds}
+        onDismissRun={onDismissRun}
+        onRestoreRuns={onRestoreRuns}
+      />
       <BillingCard billing={billing} />
-      <CiCard runs={failingRuns} isUpdating={detailLevel === "quick"} />
-      <CiSummaryCard runs={runs} repos={repos} isUpdating={detailLevel === "quick"} />
     </aside>
   )
 }
 
+
 function WarningPanel({ warnings }: { warnings: DashboardWarning[] }) {
-  if (warnings.length === 0) return null
+  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
+  const visible = warnings.filter((warning) => !dismissed.has(warningKey(warning)))
+
+  if (visible.length === 0) return null
 
   return (
     <Alert>
@@ -49,17 +64,36 @@ function WarningPanel({ warnings }: { warnings: DashboardWarning[] }) {
       <AlertTitle>Partial data</AlertTitle>
       <AlertDescription>
         <div className="flex flex-col gap-2">
-          {warnings.slice(0, 3).map((warning) => (
-            <div key={`${warning.area}-${warning.message}`}>
+          {visible.slice(0, 3).map((warning) => (
+            <div key={warningKey(warning)} className="group relative pr-6">
               <span className="font-medium">{warning.area}: </span>
               <span>{warning.message}</span>
               {warning.fix ? <code className="mt-1 block rounded-md bg-muted px-2 py-1 font-mono text-xs text-foreground">{warning.fix}</code> : null}
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                className="absolute top-0 right-0 text-muted-foreground hover:text-foreground"
+                onClick={() => setDismissed((current) => new Set(current).add(warningKey(warning)))}
+              >
+                <XIcon className="size-3" aria-hidden="true" />
+                <span className="sr-only">Dismiss {warning.area} warning</span>
+              </Button>
             </div>
           ))}
         </div>
       </AlertDescription>
     </Alert>
   )
+}
+
+function warningKey(warning: DashboardWarning) {
+  return `${warning.area}:${warning.message}`
+}
+
+function billingUnitLabel(unitType: string | null): string {
+  if (unitType === "Minutes") return "Runner minutes"
+  if (unitType === "GigabyteHours") return "Storage GB-hours"
+  return unitType ?? "Units"
 }
 
 function BillingCard({ billing }: { billing: BillingSummary }) {
@@ -81,39 +115,36 @@ function BillingCard({ billing }: { billing: BillingSummary }) {
       <CardContent className="flex min-h-0 flex-col gap-2.5 overflow-y-auto px-3 py-2 [scrollbar-gutter:stable]">
         {billing.available ? (
           <>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <div className="text-xs text-muted-foreground">Billed</div>
-                <div className="font-mono text-lg leading-tight">{formatMoney(billing.netAmount)}</div>
+            <div className="flex items-baseline justify-between gap-3">
+              <div className="flex items-baseline gap-1.5">
+                <span className="font-mono text-xl leading-none">{formatMoney(billing.netAmount)}</span>
+                <span className="text-xs text-muted-foreground">billed</span>
               </div>
-              <div>
-                <div className="text-xs text-muted-foreground">Gross</div>
-                <div className="font-mono text-lg leading-tight">{formatMoney(billing.grossAmount)}</div>
+              <div className="text-xs text-muted-foreground">
+                <span className="font-mono">{formatMoney(billing.grossAmount)}</span> gross
               </div>
             </div>
             <div className="flex flex-col gap-1">
               <Progress value={coveredPercent} />
               <div className="flex justify-between gap-3 text-xs text-muted-foreground">
-                <span>Covered</span>
+                <span>Covered by plan</span>
                 <span className="font-mono">{formatMoney(billing.discountAmount)}</span>
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+            <div className="flex flex-col gap-1 border-t pt-2 text-xs">
               {billing.unitTotals.map((unit) => (
-                <div key={unit.unitType} className="grid grid-cols-[1fr_auto] gap-2">
-                  <div className="text-xs text-muted-foreground">{unit.unitType}</div>
-                  <div className="font-mono text-sm">{formatBillingQuantity(unit.quantity, unit.unitType)}</div>
+                <div key={unit.unitType} className="flex items-center justify-between gap-3">
+                  <span className="text-muted-foreground">{billingUnitLabel(unit.unitType)}</span>
+                  <span className="font-mono whitespace-nowrap">{formatNumber(unit.quantity)}</span>
                 </div>
               ))}
             </div>
-            <div className="flex flex-col gap-1">
+            <div className="flex flex-col gap-1 border-t pt-2 text-xs">
               {billing.skus.slice(0, 3).map((sku) => (
-                <div key={sku.sku} className="grid grid-cols-[1fr_auto] gap-3 rounded-md px-1.5 py-1 text-sm">
-                  <span className="min-w-0">
-                    <span className="block truncate text-muted-foreground">{sku.sku}</span>
-                    <span className="font-mono text-xs text-muted-foreground">{formatBillingQuantity(sku.quantity, sku.unitType)}</span>
-                  </span>
-                  <span className="font-mono">{formatMoney(sku.grossAmount)}</span>
+                <div key={sku.sku} className="grid grid-cols-[1fr_auto_auto] items-center gap-2">
+                  <span className="min-w-0 truncate text-muted-foreground">{sku.sku}</span>
+                  <span className="font-mono whitespace-nowrap text-[11px] text-muted-foreground">{formatBillingQuantity(sku.quantity, sku.unitType)}</span>
+                  <span className="font-mono whitespace-nowrap">{formatMoney(sku.grossAmount)}</span>
                 </div>
               ))}
             </div>
@@ -130,14 +161,44 @@ function BillingCard({ billing }: { billing: BillingSummary }) {
   )
 }
 
-function CiCard({ runs, isUpdating }: { runs: WorkflowRunSummary[]; isUpdating: boolean }) {
+function CiCard({
+  runs,
+  isUpdating,
+  dismissedRunIds,
+  onDismissRun,
+  onRestoreRuns,
+}: {
+  runs: WorkflowRunSummary[]
+  isUpdating: boolean
+  dismissedRunIds: Set<number>
+  onDismissRun: (id: number) => void
+  onRestoreRuns: () => void
+}) {
+  const visibleRuns = runs.filter((run) => !dismissedRunIds.has(run.id))
+  const hiddenCount = runs.length - visibleRuns.length
+
   return (
     <Card id="ci" className="min-h-0 shrink-0 gap-0 rounded-lg py-0 shadow-sm shadow-foreground/[0.02] lg:max-h-[34vh]" size="sm">
       <CardHeader className="min-h-10 border-b px-3 py-2 [.border-b]:pb-2">
-        <CardTitle className="text-sm leading-tight">Workflow Failures</CardTitle>
-        <CardDescription className="text-xs">
-          {isUpdating ? "Workflow details updating" : runs.length ? `${runs.length} recent non-green runs` : "No failing runs in scanned repos"}
-        </CardDescription>
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <CardTitle className="text-sm leading-tight">Workflow Failures</CardTitle>
+            <CardDescription className="text-xs">
+              {isUpdating
+                ? "Workflow details updating"
+                : visibleRuns.length
+                  ? `${visibleRuns.length} recent non-green runs`
+                  : hiddenCount
+                    ? "All failures dismissed"
+                    : "No failing runs in scanned repos"}
+            </CardDescription>
+          </div>
+          {hiddenCount > 0 && !isUpdating ? (
+            <Button variant="ghost" size="xs" className="shrink-0 text-muted-foreground" onClick={onRestoreRuns}>
+              Show {hiddenCount} hidden
+            </Button>
+          ) : null}
+        </div>
       </CardHeader>
       <CardContent className="flex min-h-0 flex-col gap-1 overflow-y-auto px-2 py-2 [scrollbar-gutter:stable]">
         {isUpdating ? (
@@ -145,74 +206,40 @@ function CiCard({ runs, isUpdating }: { runs: WorkflowRunSummary[]; isUpdating: 
             <ShieldAlertIcon className="size-4" aria-hidden="true" />
             Pulling workflow runs in the background.
           </div>
-        ) : runs.length ? (
-          runs.slice(0, 4).map((run) => (
-            <a key={run.id} href={run.url} target="_blank" rel="noreferrer" className="flex flex-col gap-0.5 rounded-md px-1.5 py-1 outline-none transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40">
-              <div className="flex items-center justify-between gap-3">
-                <span className="min-w-0 truncate font-medium">{run.name}</span>
-                <StatusBadge state={run.conclusion ?? run.status} />
-              </div>
-              <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-                <span className="truncate">{shortRepoName(run.repo)} · {formatDuration(run.durationSeconds)}</span>
-                <span className="inline-flex items-center gap-1">
-                  {formatRelative(run.createdAt)}
-                  <ExternalLinkIcon className="size-3" aria-hidden="true" />
-                </span>
-              </div>
-            </a>
+        ) : visibleRuns.length ? (
+          visibleRuns.slice(0, 4).map((run) => (
+            <div key={run.id} className="group relative">
+              <a href={run.url} target="_blank" rel="noreferrer" className="flex flex-col gap-0.5 rounded-md px-1.5 py-1 pr-7 outline-none transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="min-w-0 truncate font-medium">{run.name}</span>
+                  <StatusBadge state={run.conclusion ?? run.status} />
+                </div>
+                <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                  <span className="truncate">{shortRepoName(run.repo)} · {formatDuration(run.durationSeconds)}</span>
+                  <span className="inline-flex items-center gap-1">
+                    {formatRelative(run.createdAt)}
+                    <ExternalLinkIcon className="size-3" aria-hidden="true" />
+                  </span>
+                </div>
+              </a>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                className="absolute top-1/2 right-1 -translate-y-1/2 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-foreground focus-visible:opacity-100"
+                onClick={() => onDismissRun(run.id)}
+              >
+                <XIcon className="size-3" aria-hidden="true" />
+                <span className="sr-only">Dismiss {run.name} failure</span>
+              </Button>
+            </div>
           ))
         ) : (
           <div className="flex items-center gap-2 rounded-md bg-muted/40 px-2 py-2 text-sm text-muted-foreground">
             <ShieldAlertIcon className="size-4" aria-hidden="true" />
-            Latest scanned workflows are green or unavailable.
+            {hiddenCount ? "Dismissed failures are hidden." : "Latest scanned workflows are green or unavailable."}
           </div>
         )}
       </CardContent>
     </Card>
-  )
-}
-
-function CiSummaryCard({
-  runs,
-  repos,
-  isUpdating,
-}: {
-  runs: WorkflowRunSummary[]
-  repos: RepoSummary[]
-  isUpdating: boolean
-}) {
-  const completedRuns = runs.filter((run) => run.status === "completed")
-  const successfulRuns = completedRuns.filter((run) => isGithubStatusSuccess(run.conclusion))
-  const failedRuns = completedRuns.filter((run) => isGithubStatusFailure(run.conclusion ?? run.status))
-  const workflowRepos = new Set(runs.map((run) => run.repo))
-  const successRate = completedRuns.length
-    ? Math.round((successfulRuns.length / completedRuns.length) * 1000) / 10
-    : 0
-
-  return (
-    <Card className="shrink-0 gap-0 rounded-lg py-0 shadow-sm shadow-foreground/[0.02]" size="sm">
-      <CardHeader className="min-h-10 border-b px-3 py-2 [.border-b]:pb-2">
-        <CardTitle className="text-sm leading-tight">CI Summary</CardTitle>
-        <CardDescription className="text-xs">{isUpdating ? "Updating" : "Recent scanned runs"}</CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-1.5 px-3 py-2 text-sm">
-        <SummaryRow label="Workflow repos" value={isUpdating ? "..." : formatNumber(workflowRepos.size)} />
-        <SummaryRow label="Success rate" value={isUpdating ? "..." : `${successRate}%`} />
-        <SummaryRow label="Total runs" value={isUpdating ? "..." : formatNumber(runs.length)} />
-        <SummaryRow label="Failed runs" value={isUpdating ? "..." : formatNumber(failedRuns.length)} />
-        <div className="border-t pt-2 text-xs text-muted-foreground">
-          {formatNumber(repos.length)} repos tracked
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function SummaryRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="grid grid-cols-[1fr_auto] gap-3">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="font-mono">{value}</span>
-    </div>
   )
 }

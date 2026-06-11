@@ -1,6 +1,9 @@
+import { AsyncLocalStorage } from "node:async_hooks"
 import { execFile } from "node:child_process"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
+
+import { createTokenExecutor, type GhExecutor } from "./github-client.ts"
 import type {
   BillingRepoSummary,
   BillingSkuSummary,
@@ -15,7 +18,7 @@ import type {
   WorkflowRunSummary,
 } from "../src/types/github"
 
-const GH_BIN = process.env.GH_BIN || "/Users/jk/.local/bin/gh"
+const GH_BIN = process.env.GH_BIN || "gh"
 const API_VERSION = "2026-03-10"
 const FULL_CACHE_MS = 5 * 60_000
 const QUICK_CACHE_MS = 60_000
@@ -30,20 +33,44 @@ type CacheEntry = {
   payload: DashboardPayload
 }
 
-let fullCache: CacheEntry | null = null
-let quickCache: CacheEntry | null = null
+const LOCAL_CACHE_KEY = "local"
+const MAX_CACHED_USERS = 200
+
+const fullCaches = new Map<string, CacheEntry>()
+const quickCaches = new Map<string, CacheEntry>()
 const inFlightDashboards = new Map<string, Promise<DashboardPayload>>()
-let repoDetailsCache = createEmptyRepoDetailsCache()
-let repoDetailsCacheLoaded = false
+const repoDetailsCaches = new Map<string, RepoDetailsCacheFile>()
+let localRepoDetailsCacheLoaded = false
 let skipRepoDetailsCacheWrites = false
+
+type AuthContext = {
+  executor: GhExecutor
+  cacheKey: string
+}
+
+const authContext = new AsyncLocalStorage<AuthContext>()
+
+function currentExecutor(): GhExecutor {
+  return authContext.getStore()?.executor ?? ghExecutor
+}
+
+function currentCacheKey(): string {
+  return authContext.getStore()?.cacheKey ?? LOCAL_CACHE_KEY
+}
+
+function boundedMapSet<T>(map: Map<string, T>, key: string, value: T) {
+  if (!map.has(key) && map.size >= MAX_CACHED_USERS) {
+    const oldest = map.keys().next().value
+    if (oldest !== undefined) map.delete(oldest)
+  }
+  map.set(key, value)
+}
 
 type GhError = Error & {
   stderr?: string
   stdout?: string
   endpoint?: string
 }
-
-type GhExecutor = (args: string[], endpoint: string) => Promise<string>
 
 let ghExecutor: GhExecutor = execGh
 
@@ -80,6 +107,7 @@ type RawSearchIssue = {
   user?: { login: string }
   labels?: Array<{ name: string }>
   pull_request?: unknown
+  draft?: boolean
 }
 
 type RawCommit = {
@@ -103,6 +131,7 @@ type RawPullRequest = {
   updated_at: string
   created_at: string
   user?: { login: string }
+  draft?: boolean
 }
 
 type RawWorkflowRun = {
@@ -157,7 +186,28 @@ type RepoDetailsCacheFile = {
   repos: Record<string, RepoDetailsCacheEntry>
 }
 
+export type DashboardAuth = {
+  token: string
+  userKey: string
+}
+
 export async function getGithubDashboard(options: {
+  force?: boolean
+  quick?: boolean
+  scanLimit?: number
+  auth?: DashboardAuth
+} = {}): Promise<DashboardPayload> {
+  if (options.auth) {
+    const context: AuthContext = {
+      executor: createTokenExecutor(options.auth.token),
+      cacheKey: `user:${options.auth.userKey}`,
+    }
+    return authContext.run(context, () => getGithubDashboardInner(options))
+  }
+  return getGithubDashboardInner(options)
+}
+
+async function getGithubDashboardInner(options: {
   force?: boolean
   quick?: boolean
   scanLimit?: number
@@ -172,7 +222,7 @@ export async function getGithubDashboard(options: {
     return cached
   }
 
-  const inFlightKey = `${quick ? "quick" : "full"}:${scanLimit}:${force ? "force" : "normal"}`
+  const inFlightKey = `${currentCacheKey()}:${quick ? "quick" : "full"}:${scanLimit}:${force ? "force" : "normal"}`
   const existing = inFlightDashboards.get(inFlightKey)
   if (existing) return existing
 
@@ -200,6 +250,9 @@ function getCachedDashboard({
   now: number
 }): DashboardPayload | null {
   if (force) return null
+
+  const fullCache = fullCaches.get(currentCacheKey())
+  const quickCache = quickCaches.get(currentCacheKey())
 
   if (quick) {
     if (fullCache && now - fullCache.timestamp < FULL_CACHE_MS && fullCache.payload.scanLimit === scanLimit) {
@@ -229,7 +282,7 @@ async function loadGithubDashboard({
 }): Promise<DashboardPayload> {
   if (quick) {
     const payload = await getQuickDashboard(scanLimit)
-    quickCache = { timestamp: now, payload }
+    boundedMapSet(quickCaches, currentCacheKey(), { timestamp: now, payload })
     return payload
   }
 
@@ -274,7 +327,7 @@ async function loadGithubDashboard({
     warnings,
   }
 
-  fullCache = { timestamp: now, payload }
+  boundedMapSet(fullCaches, currentCacheKey(), { timestamp: now, payload })
   return payload
 }
 
@@ -477,21 +530,31 @@ async function getLatestRepoPullRequest(repo: RepoSummary): Promise<IssueSummary
 }
 
 async function loadRepoDetailsCache(): Promise<RepoDetailsCacheFile> {
-  if (repoDetailsCacheLoaded) return repoDetailsCache
+  const key = currentCacheKey()
+  const existing = repoDetailsCaches.get(key)
+  if (existing && (key !== LOCAL_CACHE_KEY || localRepoDetailsCacheLoaded)) return existing
 
-  repoDetailsCacheLoaded = true
-  try {
-    const parsed = JSON.parse(await readFile(REPO_DETAILS_CACHE_PATH, "utf8")) as unknown
-    repoDetailsCache = normalizeRepoDetailsCache(parsed)
-  } catch {
-    repoDetailsCache = createEmptyRepoDetailsCache()
+  if (key !== LOCAL_CACHE_KEY) {
+    const created = createEmptyRepoDetailsCache()
+    boundedMapSet(repoDetailsCaches, key, created)
+    return created
   }
 
-  return repoDetailsCache
+  localRepoDetailsCacheLoaded = true
+  let cache: RepoDetailsCacheFile
+  try {
+    const parsed = JSON.parse(await readFile(REPO_DETAILS_CACHE_PATH, "utf8")) as unknown
+    cache = normalizeRepoDetailsCache(parsed)
+  } catch {
+    cache = createEmptyRepoDetailsCache()
+  }
+  repoDetailsCaches.set(LOCAL_CACHE_KEY, cache)
+  return cache
 }
 
 async function writeRepoDetailsCache(cache: RepoDetailsCacheFile) {
-  if (skipRepoDetailsCacheWrites) return
+  // Hosted users keep repo details in memory only; the disk cache is for local mode.
+  if (skipRepoDetailsCacheWrites || currentCacheKey() !== LOCAL_CACHE_KEY) return
 
   try {
     await mkdir(dirname(REPO_DETAILS_CACHE_PATH), { recursive: true })
@@ -770,6 +833,7 @@ function toIssueSummary(item: RawSearchIssue, isPullRequest: boolean): IssueSumm
     author: item.user?.login ?? null,
     labels: (item.labels ?? []).map((label) => label.name).slice(0, 3),
     isPullRequest,
+    isDraft: Boolean(item.draft),
   }
 }
 
@@ -786,6 +850,7 @@ function toPullRequestSummary(repo: string, item: RawPullRequest): IssueSummary 
     author: item.user?.login ?? null,
     labels: [],
     isPullRequest: true,
+    isDraft: Boolean(item.draft),
   }
 }
 
@@ -816,7 +881,7 @@ async function ghJson<T>(
   if (options.paginate) args.push("--paginate")
   if (options.slurp) args.push("--slurp")
 
-  const stdout = await ghExecutor(args, endpoint)
+  const stdout = await currentExecutor()(args, endpoint)
   return JSON.parse(stdout) as T
 }
 
@@ -826,7 +891,7 @@ async function ghGraphql<T>(query: string, fields: Record<string, string | undef
     if (value == null) continue
     args.push("-F", `${key}=${value}`)
   }
-  const stdout = await ghExecutor(args, "graphql")
+  const stdout = await currentExecutor()(args, "graphql")
   return JSON.parse(stdout) as T
 }
 
@@ -960,10 +1025,11 @@ function clamp(value: number, min: number, max: number): number {
 
 export function configureGithubDashboardForTests(executor: GhExecutor | null) {
   ghExecutor = executor ?? execGh
-  fullCache = null
-  quickCache = null
-  repoDetailsCache = createEmptyRepoDetailsCache()
-  repoDetailsCacheLoaded = Boolean(executor)
+  fullCaches.clear()
+  quickCaches.clear()
+  repoDetailsCaches.clear()
+  if (executor) repoDetailsCaches.set(LOCAL_CACHE_KEY, createEmptyRepoDetailsCache())
+  localRepoDetailsCacheLoaded = Boolean(executor)
   skipRepoDetailsCacheWrites = Boolean(executor)
   inFlightDashboards.clear()
 }

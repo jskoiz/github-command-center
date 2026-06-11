@@ -84,6 +84,13 @@ export function formatBillingQuantity(quantity: number, unitType: string | null)
   return `${formatDecimal(quantity, digits)} ${label}`
 }
 
+let viewerLoginPrefix: string | null = null
+
+export function setViewerLogin(login: string | null) {
+  viewerLoginPrefix = login
+}
+
 export function shortRepoName(fullName: string): string {
-  return fullName.replace(/^jskoiz\//, "")
+  if (!viewerLoginPrefix) return fullName
+  return fullName.startsWith(`${viewerLoginPrefix}/`) ? fullName.slice(viewerLoginPrefix.length + 1) : fullName
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { formatBillingQuantity, formatDuration, shortRepoName } from "./format"
+import { formatBillingQuantity, formatDuration, setViewerLogin, shortRepoName } from "./format"
 
 describe("formatDuration", () => {
   it("formats missing and sub-minute durations", () => {
@@ -28,11 +28,19 @@ describe("formatBillingQuantity", () => {
 })
 
 describe("shortRepoName", () => {
-  it("removes the personal owner prefix used by the current dashboard", () => {
+  it("removes the signed-in viewer's owner prefix", () => {
+    setViewerLogin("jskoiz")
     expect(shortRepoName("jskoiz/github-command-center")).toBe("github-command-center")
+    setViewerLogin(null)
   })
 
   it("keeps other owners visible", () => {
+    setViewerLogin("jskoiz")
     expect(shortRepoName("octocat/hello-world")).toBe("octocat/hello-world")
+    setViewerLogin(null)
+  })
+
+  it("keeps full names when no viewer is known", () => {
+    expect(shortRepoName("jskoiz/github-command-center")).toBe("jskoiz/github-command-center")
   })
 })
