@@ -32,6 +32,8 @@ export type RepoSummary = {
   openIssues: number | null
   openPullRequests: number | null
   checkState: string | null
+  latestCommit: CommitSummary | null
+  latestPullRequest: IssueSummary | null
   latestRun: WorkflowRunSummary | null
 }
 

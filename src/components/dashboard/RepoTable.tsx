@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
+import type { DragEvent as ReactDragEvent, PointerEvent as ReactPointerEvent } from "react"
 import {
   ArrowDownIcon,
   ArrowUpDownIcon,
@@ -8,6 +9,7 @@ import {
   ChevronRightIcon,
   Columns3Icon,
   ExternalLinkIcon,
+  GripVerticalIcon,
   RotateCcwIcon,
 } from "lucide-react"
 
@@ -43,7 +45,7 @@ import {
 } from "@/components/ui/table"
 import { formatCompactNumber, formatDecimal, formatDuration, formatRelative } from "@/lib/format"
 import { cn } from "@/lib/utils"
-import type { CommitSummary, IssueSummary, RepoSummary } from "@/types/github"
+import type { RepoSummary } from "@/types/github"
 import { StatusBadge } from "./StatusBadge"
 
 export type RepoSortKey =
@@ -90,28 +92,39 @@ type RepoColumn = {
   sortKey?: RepoSortKey
   align?: "left" | "right" | "center"
   required?: boolean
-  headerClassName?: string
+  width: number
+  minWidth: number
+  maxWidth: number
   cellClassName?: string
 }
 
-const COLUMN_STORAGE_KEY = "github-command-center:repo-columns:v2"
+type ColumnDropPosition = "before" | "after"
+
+type ColumnState = {
+  order: RepoColumnKey[]
+  visible: Set<RepoColumnKey>
+  widths: Record<RepoColumnKey, number>
+}
+
+const COLUMN_STORAGE_KEY = "github-command-center:repo-columns:v7"
+const COLUMN_RESIZE_STEP = 24
 
 const COLUMN_DEFS: RepoColumn[] = [
-  { key: "repo", label: "Repo", sortKey: "fullName", required: true, headerClassName: "w-56", cellClassName: "w-56 max-w-56" },
-  { key: "language", label: "Lang", sortKey: "language", headerClassName: "w-28", cellClassName: "w-28" },
-  { key: "visibility", label: "Vis", sortKey: "visibility", headerClassName: "w-24", cellClassName: "w-24" },
-  { key: "stars", label: "Stars", sortKey: "stars", align: "right", headerClassName: "w-20", cellClassName: "w-20 text-right font-mono" },
-  { key: "forks", label: "Forks", sortKey: "forks", align: "right", headerClassName: "w-20", cellClassName: "w-20 text-right font-mono" },
-  { key: "openPullRequests", label: "PRs", sortKey: "openPullRequests", align: "right", headerClassName: "w-18", cellClassName: "w-18 text-right font-mono" },
-  { key: "openIssues", label: "Issues", sortKey: "openIssues", align: "right", headerClassName: "w-20", cellClassName: "w-20 text-right font-mono" },
-  { key: "ci", label: "CI", sortKey: "checkState", align: "center", headerClassName: "w-16", cellClassName: "w-16 text-center" },
-  { key: "pushedAt", label: "Pushed", sortKey: "pushedAt", headerClassName: "w-28", cellClassName: "w-28 whitespace-nowrap text-muted-foreground" },
-  { key: "updatedAt", label: "Updated", sortKey: "updatedAt", headerClassName: "w-28", cellClassName: "w-28 whitespace-nowrap text-muted-foreground" },
-  { key: "lastCommit", label: "Commit", sortKey: "lastCommitAt", headerClassName: "min-w-64", cellClassName: "min-w-64 text-muted-foreground" },
-  { key: "lastPullRequest", label: "Last PR", sortKey: "lastPullRequestAt", headerClassName: "min-w-56", cellClassName: "min-w-56 text-muted-foreground" },
-  { key: "latestRun", label: "Run", headerClassName: "min-w-52", cellClassName: "min-w-52 text-muted-foreground" },
-  { key: "sizeKb", label: "Size", sortKey: "sizeKb", align: "right", headerClassName: "w-20", cellClassName: "w-20 text-right font-mono" },
-  { key: "defaultBranch", label: "Branch", sortKey: "defaultBranch", headerClassName: "w-32", cellClassName: "w-32 font-mono text-muted-foreground" },
+  { key: "repo", label: "Repo", sortKey: "fullName", required: true, width: 224, minWidth: 168, maxWidth: 420 },
+  { key: "language", label: "Lang", sortKey: "language", width: 112, minWidth: 88, maxWidth: 220 },
+  { key: "visibility", label: "Vis", sortKey: "visibility", width: 96, minWidth: 88, maxWidth: 180 },
+  { key: "stars", label: "Stars", sortKey: "stars", align: "right", width: 80, minWidth: 72, maxWidth: 160, cellClassName: "text-right font-mono" },
+  { key: "forks", label: "Forks", sortKey: "forks", align: "right", width: 80, minWidth: 72, maxWidth: 160, cellClassName: "text-right font-mono" },
+  { key: "openPullRequests", label: "PRs", sortKey: "openPullRequests", align: "right", width: 72, minWidth: 64, maxWidth: 140, cellClassName: "text-right font-mono" },
+  { key: "openIssues", label: "Issues", sortKey: "openIssues", align: "right", width: 84, minWidth: 72, maxWidth: 160, cellClassName: "text-right font-mono" },
+  { key: "ci", label: "CI", sortKey: "checkState", align: "center", width: 72, minWidth: 64, maxWidth: 140, cellClassName: "text-center" },
+  { key: "pushedAt", label: "Pushed", sortKey: "pushedAt", width: 112, minWidth: 96, maxWidth: 220, cellClassName: "text-muted-foreground" },
+  { key: "updatedAt", label: "Updated", sortKey: "updatedAt", width: 112, minWidth: 96, maxWidth: 220, cellClassName: "text-muted-foreground" },
+  { key: "lastCommit", label: "Commit", sortKey: "lastCommitAt", width: 288, minWidth: 192, maxWidth: 560, cellClassName: "text-muted-foreground" },
+  { key: "lastPullRequest", label: "PR / CI", sortKey: "lastPullRequestAt", width: 304, minWidth: 216, maxWidth: 600, cellClassName: "text-muted-foreground" },
+  { key: "latestRun", label: "Run", width: 240, minWidth: 176, maxWidth: 520, cellClassName: "text-muted-foreground" },
+  { key: "sizeKb", label: "Size", sortKey: "sizeKb", align: "right", width: 88, minWidth: 72, maxWidth: 180, cellClassName: "text-right font-mono" },
+  { key: "defaultBranch", label: "Branch", sortKey: "defaultBranch", width: 136, minWidth: 104, maxWidth: 260, cellClassName: "font-mono text-muted-foreground" },
 ]
 
 const DEFAULT_COLUMN_ORDER: RepoColumnKey[] = [
@@ -123,8 +136,8 @@ const DEFAULT_COLUMN_ORDER: RepoColumnKey[] = [
   "openIssues",
   "lastCommit",
   "lastPullRequest",
-  "ci",
   "latestRun",
+  "ci",
   "pushedAt",
   "forks",
   "updatedAt",
@@ -134,18 +147,15 @@ const DEFAULT_COLUMN_ORDER: RepoColumnKey[] = [
 
 const DEFAULT_VISIBLE_COLUMNS = new Set<RepoColumnKey>([
   "repo",
-  "language",
-  "visibility",
-  "stars",
   "openPullRequests",
   "openIssues",
   "lastCommit",
   "lastPullRequest",
-  "ci",
   "latestRun",
 ])
 
 const COLUMN_DEF_BY_KEY = new Map(COLUMN_DEFS.map((column) => [column.key, column]))
+const DEFAULT_COLUMN_WIDTHS = createDefaultColumnWidths()
 
 export function RepoTable({
   repos,
@@ -155,8 +165,6 @@ export function RepoTable({
   pageSize,
   sort,
   viewerLogin,
-  latestCommitByRepo,
-  latestPullRequestByRepo,
   onPageChange,
   onPageSizeChange,
   onSort,
@@ -168,14 +176,20 @@ export function RepoTable({
   pageSize: number
   sort: RepoSort
   viewerLogin: string
-  latestCommitByRepo: Map<string, CommitSummary>
-  latestPullRequestByRepo: Map<string, IssueSummary>
   onPageChange: (pageIndex: number) => void
   onPageSizeChange: (pageSize: number) => void
   onSort: (key: RepoSortKey) => void
 }) {
-  const [columnOrder, setColumnOrder] = useState<RepoColumnKey[]>(() => loadColumnState().order)
-  const [visibleColumns, setVisibleColumns] = useState<Set<RepoColumnKey>>(() => loadColumnState().visible)
+  const [initialColumnState] = useState<ColumnState>(() => loadColumnState())
+  const [columnOrder, setColumnOrder] = useState<RepoColumnKey[]>(() => initialColumnState.order)
+  const [visibleColumns, setVisibleColumns] = useState<Set<RepoColumnKey>>(() => initialColumnState.visible)
+  const [columnWidths, setColumnWidths] = useState<Record<RepoColumnKey, number>>(() => initialColumnState.widths)
+  const [columnPreferencesDirty, setColumnPreferencesDirty] = useState(false)
+  const [dragState, setDragState] = useState<{
+    source: RepoColumnKey | null
+    target: RepoColumnKey | null
+    position: ColumnDropPosition
+  }>({ source: null, target: null, position: "before" })
   const pageCount = Math.max(1, Math.ceil(filteredCount / pageSize))
   const canGoPrevious = pageIndex > 0
   const canGoNext = pageIndex < pageCount - 1
@@ -187,19 +201,30 @@ export function RepoTable({
       .map((key) => COLUMN_DEF_BY_KEY.get(key))
       .filter((column): column is RepoColumn => Boolean(column))
   }, [orderedColumns, visibleColumns])
+  const tableWidth = useMemo(() => {
+    return renderedColumns.reduce((total, column) => total + getColumnWidth(columnWidths, column.key), 0)
+  }, [columnWidths, renderedColumns])
 
   useEffect(() => {
+    if (!columnPreferencesDirty) return
+
     const payload = {
       order: orderedColumns,
       visible: [...visibleColumns],
+      widths: normalizeColumnWidths(columnWidths),
     }
-    window.localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(payload))
-  }, [orderedColumns, visibleColumns])
+    try {
+      window.localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(payload))
+    } catch {
+      // Column preferences are best-effort and should not break table rendering.
+    }
+  }, [columnPreferencesDirty, columnWidths, orderedColumns, visibleColumns])
 
   function toggleColumn(key: RepoColumnKey) {
     const column = COLUMN_DEF_BY_KEY.get(key)
     if (column?.required) return
 
+    setColumnPreferencesDirty(true)
     setVisibleColumns((current) => {
       const next = new Set(current)
       if (next.has(key)) {
@@ -212,6 +237,7 @@ export function RepoTable({
   }
 
   function moveColumn(key: RepoColumnKey, direction: -1 | 1) {
+    setColumnPreferencesDirty(true)
     setColumnOrder((current) => {
       const next = normalizeColumnOrder(current)
       const index = next.indexOf(key)
@@ -224,17 +250,97 @@ export function RepoTable({
     })
   }
 
+  function moveColumnTo(source: RepoColumnKey, target: RepoColumnKey, position: ColumnDropPosition) {
+    setColumnPreferencesDirty(true)
+    setColumnOrder((current) => reorderColumn(current, source, target, position))
+  }
+
+  function resizeColumn(key: RepoColumnKey, nextWidth: number) {
+    setColumnPreferencesDirty(true)
+    setColumnWidths((current) => ({
+      ...current,
+      [key]: normalizeColumnWidth(key, nextWidth),
+    }))
+  }
+
+  function startColumnResize(key: RepoColumnKey, event: ReactPointerEvent<HTMLButtonElement>) {
+    event.preventDefault()
+    event.stopPropagation()
+
+    const startX = event.clientX
+    const startWidth = getColumnWidth(columnWidths, key)
+    const previousCursor = document.body.style.cursor
+    const previousUserSelect = document.body.style.userSelect
+    document.body.style.cursor = "col-resize"
+    document.body.style.userSelect = "none"
+
+    function handlePointerMove(moveEvent: PointerEvent) {
+      resizeColumn(key, startWidth + moveEvent.clientX - startX)
+    }
+
+    function handlePointerUp() {
+      document.body.style.cursor = previousCursor
+      document.body.style.userSelect = previousUserSelect
+      window.removeEventListener("pointermove", handlePointerMove)
+      window.removeEventListener("pointerup", handlePointerUp)
+    }
+
+    window.addEventListener("pointermove", handlePointerMove)
+    window.addEventListener("pointerup", handlePointerUp)
+  }
+
+  function resizeColumnByKeyboard(key: RepoColumnKey, direction: -1 | 1) {
+    resizeColumn(key, getColumnWidth(columnWidths, key) + direction * COLUMN_RESIZE_STEP)
+  }
+
+  function handleColumnDragStart(key: RepoColumnKey, event: ReactDragEvent<HTMLButtonElement>) {
+    event.dataTransfer.effectAllowed = "move"
+    event.dataTransfer.setData("text/plain", key)
+    setDragState({ source: key, target: key, position: "before" })
+  }
+
+  function handleColumnDragOver(key: RepoColumnKey, event: ReactDragEvent<HTMLTableCellElement>) {
+    const source = dragState.source ?? getDraggedColumnKey(event)
+    if (!source || source === key) return
+
+    event.preventDefault()
+    event.dataTransfer.dropEffect = "move"
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const position: ColumnDropPosition = event.clientX - bounds.left > bounds.width / 2 ? "after" : "before"
+    setDragState({ source, target: key, position })
+  }
+
+  function handleColumnDrop(key: RepoColumnKey, event: ReactDragEvent<HTMLTableCellElement>) {
+    const source = dragState.source ?? getDraggedColumnKey(event)
+    if (!source || source === key) {
+      setDragState({ source: null, target: null, position: "before" })
+      return
+    }
+
+    event.preventDefault()
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const position: ColumnDropPosition = event.clientX - bounds.left > bounds.width / 2 ? "after" : "before"
+    moveColumnTo(source, key, position)
+    setDragState({ source: null, target: null, position: "before" })
+  }
+
+  function handleColumnDragEnd() {
+    setDragState({ source: null, target: null, position: "before" })
+  }
+
   function resetColumns() {
+    setColumnPreferencesDirty(true)
     setColumnOrder(DEFAULT_COLUMN_ORDER)
     setVisibleColumns(new Set(DEFAULT_VISIBLE_COLUMNS))
+    setColumnWidths({ ...DEFAULT_COLUMN_WIDTHS })
   }
 
   return (
-    <Card id="repos" className="min-h-0 gap-0 rounded-lg py-0 lg:h-full">
-      <CardHeader className="border-b px-3 py-1.5 [.border-b]:pb-1.5">
-        <CardTitle className="flex items-center gap-2 text-sm">
+    <Card id="repos" className="min-h-0 gap-0 rounded-lg py-0 shadow-sm shadow-foreground/[0.02] lg:h-full">
+      <CardHeader className="min-h-10 items-center border-b px-3 py-1.5 [.border-b]:pb-1.5">
+        <CardTitle className="flex items-center gap-2 text-sm leading-none">
           Repositories
-          <Badge variant="outline" className="font-mono">
+          <Badge variant="outline" className="h-5 px-1.5 font-mono">
             {filteredCount}
           </Badge>
         </CardTitle>
@@ -279,7 +385,7 @@ export function RepoTable({
                     const isVisible = visibleColumns.has(key)
 
                     return (
-                      <div key={key} className="grid grid-cols-[1fr_auto_auto] items-center gap-1 rounded-md px-1 py-0.5 hover:bg-muted">
+                      <div key={key} className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-1 rounded-md px-1 py-0.5 hover:bg-muted">
                         <label className="flex min-w-0 items-center gap-2 px-1 py-1 text-sm">
                           <input
                             type="checkbox"
@@ -291,6 +397,9 @@ export function RepoTable({
                           <span className="truncate">{column.label}</span>
                           {column.required ? <span className="text-xs text-muted-foreground">locked</span> : null}
                         </label>
+                        <div className="px-1 font-mono text-[11px] text-muted-foreground">
+                          {getColumnWidth(columnWidths, key)}
+                        </div>
                         <Button
                           variant="ghost"
                           size="icon-xs"
@@ -315,33 +424,58 @@ export function RepoTable({
                 </div>
               </DropdownMenuContent>
             </DropdownMenu>
-            <Badge variant="outline" className="font-mono">
+            <Badge variant="outline" className="h-6 px-2 font-mono">
               live gh
             </Badge>
           </div>
         </CardAction>
       </CardHeader>
       <CardContent className="flex min-h-0 flex-1 flex-col px-0 py-0">
-        <div className="min-h-0 flex-1 overflow-auto">
-          <Table className="min-w-max text-xs">
-            <TableHeader className="sticky top-0 z-10 bg-card">
+        <div className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]">
+          <Table className="table-fixed text-xs leading-none" style={{ width: tableWidth, minWidth: tableWidth }}>
+            <colgroup>
+              {renderedColumns.map((column) => (
+                <col
+                  key={column.key}
+                  style={{
+                    width: getColumnWidth(columnWidths, column.key),
+                    minWidth: column.minWidth,
+                    maxWidth: column.maxWidth,
+                  }}
+                />
+              ))}
+            </colgroup>
+            <TableHeader className="sticky top-0 z-10 bg-muted/50 backdrop-blur">
               <TableRow>
                 {renderedColumns.map((column) => (
-                  <RepoHead key={column.key} column={column} sort={sort} onSort={onSort} />
+                  <RepoHead
+                    key={column.key}
+                    column={column}
+                    width={getColumnWidth(columnWidths, column.key)}
+                    sort={sort}
+                    isDragTarget={dragState.target === column.key && dragState.source !== column.key}
+                    dropPosition={dragState.position}
+                    onSort={onSort}
+                    onResizeStart={startColumnResize}
+                    onResizeByKeyboard={resizeColumnByKeyboard}
+                    onColumnDragStart={handleColumnDragStart}
+                    onColumnDragOver={handleColumnDragOver}
+                    onColumnDrop={handleColumnDrop}
+                    onColumnDragEnd={handleColumnDragEnd}
+                  />
                 ))}
               </TableRow>
             </TableHeader>
             <TableBody>
               {repos.map((repo) => (
-                <TableRow key={repo.id} className="h-9">
+                <TableRow key={repo.id} className="h-9 hover:bg-muted/40">
                   {renderedColumns.map((column) => (
                     <RepoCell
                       key={column.key}
                       column={column}
+                      width={getColumnWidth(columnWidths, column.key)}
                       repo={repo}
                       viewerLogin={viewerLogin}
-                      latestCommit={latestCommitByRepo.get(repo.fullName)}
-                      latestPullRequest={latestPullRequestByRepo.get(repo.fullName)}
                     />
                   ))}
                 </TableRow>
@@ -349,7 +483,7 @@ export function RepoTable({
             </TableBody>
           </Table>
         </div>
-        <div className="flex items-center justify-between gap-3 border-t px-3 py-1 text-xs text-muted-foreground">
+        <div className="flex min-h-9 items-center justify-between gap-3 border-t bg-muted/20 px-3 py-1 text-xs text-muted-foreground">
           <div className="hidden sm:block">
             Showing {repos.length ? pageIndex * pageSize + 1 : 0}-{Math.min(filteredCount, (pageIndex + 1) * pageSize)} of {filteredCount}
             {filteredCount !== totalCount ? ` filtered from ${totalCount}` : ""}
@@ -399,64 +533,135 @@ export function RepoTable({
 
 function RepoHead({
   column,
+  width,
   sort,
+  isDragTarget,
+  dropPosition,
   onSort,
+  onResizeStart,
+  onResizeByKeyboard,
+  onColumnDragStart,
+  onColumnDragOver,
+  onColumnDrop,
+  onColumnDragEnd,
 }: {
   column: RepoColumn
+  width: number
   sort: RepoSort
+  isDragTarget: boolean
+  dropPosition: ColumnDropPosition
   onSort: (key: RepoSortKey) => void
+  onResizeStart: (key: RepoColumnKey, event: ReactPointerEvent<HTMLButtonElement>) => void
+  onResizeByKeyboard: (key: RepoColumnKey, direction: -1 | 1) => void
+  onColumnDragStart: (key: RepoColumnKey, event: ReactDragEvent<HTMLButtonElement>) => void
+  onColumnDragOver: (key: RepoColumnKey, event: ReactDragEvent<HTMLTableCellElement>) => void
+  onColumnDrop: (key: RepoColumnKey, event: ReactDragEvent<HTMLTableCellElement>) => void
+  onColumnDragEnd: () => void
 }) {
   const alignClassName =
     column.align === "right" ? "text-right" :
     column.align === "center" ? "text-center" :
     undefined
-
-  if (!column.sortKey) {
-    return (
-      <TableHead className={cn("h-7 px-2 text-xs", alignClassName, column.headerClassName)}>
-        {column.label}
-      </TableHead>
-    )
-  }
+  const headerClassName = cn(
+    "group relative h-8 select-none px-0 text-xs",
+    alignClassName,
+    isDragTarget && "ring-1 ring-inset ring-ring/60",
+    isDragTarget && dropPosition === "before" && "shadow-[-2px_0_0_0_var(--ring)]",
+    isDragTarget && dropPosition === "after" && "shadow-[2px_0_0_0_var(--ring)]"
+  )
+  const headerStyle = { width, minWidth: column.minWidth, maxWidth: column.maxWidth }
 
   const active = sort.key === column.sortKey
   const Icon = !active ? ArrowUpDownIcon : sort.direction === "asc" ? ArrowUpIcon : ArrowDownIcon
 
   return (
-    <TableHead className={cn("h-7 px-2 text-xs", alignClassName, column.headerClassName)}>
-      <Button
-        variant="ghost"
-        size="xs"
+    <TableHead
+      className={headerClassName}
+      style={headerStyle}
+      data-column-key={column.key}
+      onDragOver={(event) => onColumnDragOver(column.key, event)}
+      onDrop={(event) => onColumnDrop(column.key, event)}
+    >
+      <div
         className={cn(
-          "px-1",
-          column.align === "right" && "ml-auto",
-          column.align === "center" && "mx-auto"
+          "flex h-full min-w-0 items-center gap-1 px-1.5 pr-3",
+          column.align === "right" && "justify-end",
+          column.align === "center" && "justify-center"
         )}
-        onClick={() => onSort(column.sortKey!)}
       >
-        {column.label}
-        <Icon data-icon="inline-end" />
-      </Button>
+        <button
+          type="button"
+          draggable
+          className="grid size-4 shrink-0 cursor-grab place-items-center rounded-sm text-muted-foreground opacity-0 transition hover:bg-background hover:text-foreground hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40 group-hover:opacity-50 active:cursor-grabbing"
+          aria-label={`Drag ${column.label} column`}
+          title={`Drag ${column.label} column`}
+          onDragStart={(event) => onColumnDragStart(column.key, event)}
+          onDragEnd={onColumnDragEnd}
+        >
+          <GripVerticalIcon className="size-3.5" aria-hidden="true" />
+        </button>
+        {column.sortKey ? (
+          <Button
+            variant="ghost"
+            size="xs"
+            className={cn(
+              "h-6 min-w-0 px-1 font-medium text-foreground/90 hover:bg-background/70",
+              column.align === "right" && "ml-auto",
+              column.align === "center" && "mx-auto"
+            )}
+            onClick={() => onSort(column.sortKey!)}
+          >
+            <span className="truncate">{column.label}</span>
+            <Icon data-icon="inline-end" />
+          </Button>
+        ) : (
+          <span className="min-w-0 truncate px-1 font-medium text-foreground/90">{column.label}</span>
+        )}
+      </div>
+      <button
+        type="button"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={`Resize ${column.label} column`}
+        aria-valuemin={column.minWidth}
+        aria-valuemax={column.maxWidth}
+        aria-valuenow={width}
+        title={`Resize ${column.label} column`}
+        className="absolute top-0 right-0 z-20 h-full w-2 translate-x-1/2 cursor-col-resize touch-none rounded-sm outline-none after:absolute after:top-1 after:right-1/2 after:h-[calc(100%-0.5rem)] after:w-px after:bg-border/80 after:content-[''] hover:after:bg-ring focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:after:bg-ring"
+        onPointerDown={(event) => onResizeStart(column.key, event)}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft") {
+            event.preventDefault()
+            onResizeByKeyboard(column.key, -1)
+          }
+          if (event.key === "ArrowRight") {
+            event.preventDefault()
+            onResizeByKeyboard(column.key, 1)
+          }
+        }}
+      />
     </TableHead>
   )
 }
 
 function RepoCell({
   column,
+  width,
   repo,
   viewerLogin,
-  latestCommit,
-  latestPullRequest,
 }: {
   column: RepoColumn
+  width: number
   repo: RepoSummary
   viewerLogin: string
-  latestCommit: CommitSummary | undefined
-  latestPullRequest: IssueSummary | undefined
 }) {
   return (
-    <TableCell className={cn("h-9 px-2 py-0 align-middle", column.cellClassName)}>
-      {renderRepoCell(column.key, repo, viewerLogin, latestCommit, latestPullRequest)}
+    <TableCell
+      className={cn("h-9 overflow-hidden px-2 py-0 align-middle text-ellipsis", column.cellClassName)}
+      style={{ width, minWidth: column.minWidth, maxWidth: column.maxWidth }}
+    >
+      {renderRepoCell(column.key, repo, viewerLogin)}
     </TableCell>
   )
 }
@@ -464,9 +669,7 @@ function RepoCell({
 function renderRepoCell(
   key: RepoColumnKey,
   repo: RepoSummary,
-  viewerLogin: string,
-  latestCommit: CommitSummary | undefined,
-  latestPullRequest: IssueSummary | undefined
+  viewerLogin: string
 ) {
   if (key === "repo") {
     return (
@@ -474,7 +677,7 @@ function renderRepoCell(
         href={repo.url}
         target="_blank"
         rel="noreferrer"
-        className="group inline-flex min-w-0 max-w-56 items-center gap-1.5 font-medium text-foreground"
+        className="group flex min-w-0 max-w-full items-center gap-1.5 rounded-sm font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         title={repo.fullName}
       >
         <span className="truncate">{displayRepoName(repo, viewerLogin)}</span>
@@ -483,11 +686,11 @@ function renderRepoCell(
     )
   }
 
-  if (key === "language") return repo.language ?? "-"
+  if (key === "language") return repo.language ?? <EmptyValue />
 
   if (key === "visibility") {
     return (
-      <Badge variant="outline" className="h-5 capitalize">
+      <Badge variant="outline" className="h-5 rounded-md px-1.5 text-[11px] capitalize text-muted-foreground">
         {repo.visibility}
       </Badge>
     )
@@ -506,13 +709,14 @@ function renderRepoCell(
   if (key === "updatedAt") return formatRelative(repo.updatedAt)
 
   if (key === "lastCommit") {
-    if (!latestCommit) return "-"
+    const latestCommit = repo.latestCommit
+    if (!latestCommit) return <EmptyValue />
     return (
       <a
         href={latestCommit.url}
         target="_blank"
         rel="noreferrer"
-        className="inline-flex max-w-72 items-center gap-1.5 whitespace-nowrap hover:text-foreground"
+        className="flex min-w-0 max-w-full items-center gap-1.5 rounded-sm whitespace-nowrap outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
         title={`${latestCommit.message} · ${formatRelative(latestCommit.date)}`}
       >
         <span className="min-w-0 truncate text-foreground">{latestCommit.message}</span>
@@ -523,27 +727,41 @@ function renderRepoCell(
   }
 
   if (key === "lastPullRequest") {
-    if (!latestPullRequest) return "-"
+    const latestPullRequest = repo.latestPullRequest
+    const status = repo.latestRun?.conclusion ?? repo.latestRun?.status ?? repo.checkState
+
+    if (!latestPullRequest) {
+      return (
+        <div className="flex min-w-0 max-w-full items-center gap-1.5">
+          <StatusBadge compact state={status} />
+          <EmptyValue />
+        </div>
+      )
+    }
+
     return (
-      <a
-        href={latestPullRequest.url}
-        target="_blank"
-        rel="noreferrer"
-        className="inline-flex max-w-64 items-center gap-1.5 whitespace-nowrap hover:text-foreground"
-        title={`#${latestPullRequest.number} ${latestPullRequest.title} · ${formatRelative(latestPullRequest.updatedAt)}`}
-      >
-        <span className="shrink-0 font-mono text-[11px]">#{latestPullRequest.number}</span>
-        <span className="min-w-0 truncate text-foreground">{latestPullRequest.title}</span>
-        <span className="shrink-0 rounded-sm border px-1 py-px text-[10px] leading-none capitalize">{latestPullRequest.state}</span>
-        <span className="shrink-0 text-[11px]">{formatRelative(latestPullRequest.updatedAt)}</span>
-      </a>
+      <div className="flex min-w-0 max-w-full items-center gap-1.5">
+        <StatusBadge compact state={status} />
+        <a
+          href={latestPullRequest.url}
+          target="_blank"
+          rel="noreferrer"
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm whitespace-nowrap outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+          title={`#${latestPullRequest.number} ${latestPullRequest.title} · ${formatRelative(latestPullRequest.updatedAt)}`}
+        >
+          <span className="shrink-0 font-mono text-[11px]">#{latestPullRequest.number}</span>
+          <span className="min-w-0 truncate text-foreground">{latestPullRequest.title}</span>
+          <span className="shrink-0 rounded-sm border bg-muted/70 px-1 py-px text-[10px] leading-none text-muted-foreground capitalize">{latestPullRequest.state}</span>
+          <span className="shrink-0 text-[11px]">{formatRelative(latestPullRequest.updatedAt)}</span>
+        </a>
+      </div>
     )
   }
 
   if (key === "latestRun") {
-    if (!repo.latestRun) return "none"
+    if (!repo.latestRun) return <EmptyValue />
     return (
-      <a href={repo.latestRun.url} target="_blank" rel="noreferrer" className="inline-flex max-w-72 items-center gap-1.5 whitespace-nowrap hover:text-foreground">
+      <a href={repo.latestRun.url} target="_blank" rel="noreferrer" className="flex min-w-0 max-w-full items-center gap-1.5 rounded-sm whitespace-nowrap outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40">
         <span className="truncate">{repo.latestRun.name}</span>
         <span className="shrink-0 font-mono text-[11px]">{formatDuration(repo.latestRun.durationSeconds)}</span>
       </a>
@@ -551,9 +769,13 @@ function renderRepoCell(
   }
 
   if (key === "sizeKb") return formatRepoSize(repo.sizeKb)
-  if (key === "defaultBranch") return repo.defaultBranch ?? "-"
+  if (key === "defaultBranch") return repo.defaultBranch ?? <EmptyValue />
 
   return null
+}
+
+function EmptyValue() {
+  return <span className="text-muted-foreground/70">none</span>
 }
 
 function displayRepoName(repo: RepoSummary, viewerLogin: string) {
@@ -567,24 +789,92 @@ function normalizeColumnOrder(order: RepoColumnKey[]) {
   return [...normalized, ...missing]
 }
 
-function loadColumnState() {
+function reorderColumn(
+  order: RepoColumnKey[],
+  source: RepoColumnKey,
+  target: RepoColumnKey,
+  position: ColumnDropPosition
+) {
+  if (source === target) return normalizeColumnOrder(order)
+
+  const next = normalizeColumnOrder(order).filter((key) => key !== source)
+  const targetIndex = next.indexOf(target)
+  if (targetIndex < 0) return normalizeColumnOrder(order)
+
+  const insertIndex = targetIndex + (position === "after" ? 1 : 0)
+  next.splice(insertIndex, 0, source)
+  return next
+}
+
+function createDefaultColumnWidths() {
+  return Object.fromEntries(COLUMN_DEFS.map((column) => [column.key, column.width])) as Record<RepoColumnKey, number>
+}
+
+function normalizeColumnWidths(widths: Partial<Record<RepoColumnKey, number>>) {
+  return Object.fromEntries(
+    COLUMN_DEFS.map((column) => [
+      column.key,
+      normalizeColumnWidth(column.key, widths[column.key] ?? column.width),
+    ])
+  ) as Record<RepoColumnKey, number>
+}
+
+function normalizeColumnWidth(key: RepoColumnKey, width: number) {
+  const column = COLUMN_DEF_BY_KEY.get(key)
+  if (!column || !Number.isFinite(width)) return DEFAULT_COLUMN_WIDTHS[key]
+  return Math.min(column.maxWidth, Math.max(column.minWidth, Math.round(width)))
+}
+
+function getColumnWidth(widths: Record<RepoColumnKey, number>, key: RepoColumnKey) {
+  return normalizeColumnWidth(key, widths[key])
+}
+
+function getDraggedColumnKey(event: ReactDragEvent) {
+  const value = event.dataTransfer.getData("text/plain")
+  return COLUMN_DEF_BY_KEY.has(value as RepoColumnKey) ? value as RepoColumnKey : null
+}
+
+function loadColumnState(): ColumnState {
   if (typeof window === "undefined") {
-    return { order: DEFAULT_COLUMN_ORDER, visible: new Set(DEFAULT_VISIBLE_COLUMNS) }
+    return {
+      order: DEFAULT_COLUMN_ORDER,
+      visible: new Set(DEFAULT_VISIBLE_COLUMNS),
+      widths: DEFAULT_COLUMN_WIDTHS,
+    }
   }
 
   try {
     const raw = window.localStorage.getItem(COLUMN_STORAGE_KEY)
-    if (!raw) return { order: DEFAULT_COLUMN_ORDER, visible: new Set(DEFAULT_VISIBLE_COLUMNS) }
-    const parsed = JSON.parse(raw) as { order?: RepoColumnKey[]; visible?: RepoColumnKey[] }
+    if (!raw) {
+      return {
+        order: DEFAULT_COLUMN_ORDER,
+        visible: new Set(DEFAULT_VISIBLE_COLUMNS),
+        widths: DEFAULT_COLUMN_WIDTHS,
+      }
+    }
+
+    const parsed = JSON.parse(raw) as {
+      order?: RepoColumnKey[]
+      visible?: RepoColumnKey[]
+      widths?: Partial<Record<RepoColumnKey, number>>
+    }
     const order = normalizeColumnOrder(Array.isArray(parsed.order) ? parsed.order : DEFAULT_COLUMN_ORDER)
     const visible = new Set(
       (Array.isArray(parsed.visible) ? parsed.visible : [...DEFAULT_VISIBLE_COLUMNS])
         .filter((key) => COLUMN_DEF_BY_KEY.has(key))
     )
     visible.add("repo")
-    return { order, visible }
+    return {
+      order,
+      visible,
+      widths: normalizeColumnWidths(parsed.widths ?? DEFAULT_COLUMN_WIDTHS),
+    }
   } catch {
-    return { order: DEFAULT_COLUMN_ORDER, visible: new Set(DEFAULT_VISIBLE_COLUMNS) }
+    return {
+      order: DEFAULT_COLUMN_ORDER,
+      visible: new Set(DEFAULT_VISIBLE_COLUMNS),
+      widths: DEFAULT_COLUMN_WIDTHS,
+    }
   }
 }
 

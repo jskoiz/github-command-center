@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { dirname, join } from "node:path"
 import type {
   BillingRepoSummary,
   BillingSkuSummary,
@@ -17,6 +19,10 @@ const GH_BIN = process.env.GH_BIN || "/Users/jk/.local/bin/gh"
 const API_VERSION = "2026-03-10"
 const FULL_CACHE_MS = 5 * 60_000
 const QUICK_CACHE_MS = 60_000
+const REPO_DETAILS_CACHE_MS = 24 * 60 * 60_000
+const RECENT_REPO_ACTIVITY_MS = 7 * 24 * 60 * 60_000
+const REPO_DETAILS_CACHE_PATH = process.env.GITHUB_COMMAND_CENTER_REPO_CACHE
+  || join(process.cwd(), ".cache", "github-command-center", "repo-details.json")
 const MAX_BUFFER = 32 * 1024 * 1024
 
 type CacheEntry = {
@@ -26,12 +32,20 @@ type CacheEntry = {
 
 let fullCache: CacheEntry | null = null
 let quickCache: CacheEntry | null = null
+const inFlightDashboards = new Map<string, Promise<DashboardPayload>>()
+let repoDetailsCache = createEmptyRepoDetailsCache()
+let repoDetailsCacheLoaded = false
+let skipRepoDetailsCacheWrites = false
 
 type GhError = Error & {
   stderr?: string
   stdout?: string
   endpoint?: string
 }
+
+type GhExecutor = (args: string[], endpoint: string) => Promise<string>
+
+let ghExecutor: GhExecutor = execGh
 
 type RawRepo = {
   id: number
@@ -80,6 +94,17 @@ type RawCommit = {
   }
 }
 
+type RawPullRequest = {
+  id: number
+  number: number
+  title: string
+  state: string
+  html_url: string
+  updated_at: string
+  created_at: string
+  user?: { login: string }
+}
+
 type RawWorkflowRun = {
   id: number
   name: string | null
@@ -117,6 +142,21 @@ type BillingUsageItem = {
   repositoryName?: string
 }
 
+type RepoLatestDetails = {
+  latestCommit: CommitSummary | null
+  latestPullRequest: IssueSummary | null
+}
+
+type RepoDetailsCacheEntry = RepoLatestDetails & {
+  refreshedAt: number
+  activityAt: string | null
+}
+
+type RepoDetailsCacheFile = {
+  version: 1
+  repos: Record<string, RepoDetailsCacheEntry>
+}
+
 export async function getGithubDashboard(options: {
   force?: boolean
   quick?: boolean
@@ -124,21 +164,73 @@ export async function getGithubDashboard(options: {
 } = {}): Promise<DashboardPayload> {
   const now = Date.now()
   const scanLimit = clamp(options.scanLimit ?? 24, 8, 60)
+  const quick = Boolean(options.quick)
+  const force = Boolean(options.force)
+  const cached = getCachedDashboard({ force, quick, scanLimit, now })
 
-  if (options.quick) {
-    if (!options.force && fullCache && now - fullCache.timestamp < FULL_CACHE_MS && fullCache.payload.scanLimit === scanLimit) {
+  if (cached) {
+    return cached
+  }
+
+  const inFlightKey = `${quick ? "quick" : "full"}:${scanLimit}:${force ? "force" : "normal"}`
+  const existing = inFlightDashboards.get(inFlightKey)
+  if (existing) return existing
+
+  const promise = loadGithubDashboard({ quick, scanLimit, now })
+  inFlightDashboards.set(inFlightKey, promise)
+
+  try {
+    return await promise
+  } finally {
+    if (inFlightDashboards.get(inFlightKey) === promise) {
+      inFlightDashboards.delete(inFlightKey)
+    }
+  }
+}
+
+function getCachedDashboard({
+  force,
+  quick,
+  scanLimit,
+  now,
+}: {
+  force: boolean
+  quick: boolean
+  scanLimit: number
+  now: number
+}): DashboardPayload | null {
+  if (force) return null
+
+  if (quick) {
+    if (fullCache && now - fullCache.timestamp < FULL_CACHE_MS && fullCache.payload.scanLimit === scanLimit) {
       return fullCache.payload
     }
-    if (!options.force && quickCache && now - quickCache.timestamp < QUICK_CACHE_MS && quickCache.payload.scanLimit === scanLimit) {
+    if (quickCache && now - quickCache.timestamp < QUICK_CACHE_MS && quickCache.payload.scanLimit === scanLimit) {
       return quickCache.payload
     }
+    return null
+  }
+
+  if (fullCache && now - fullCache.timestamp < FULL_CACHE_MS && fullCache.payload.scanLimit === scanLimit) {
+    return fullCache.payload
+  }
+
+  return null
+}
+
+async function loadGithubDashboard({
+  quick,
+  scanLimit,
+  now,
+}: {
+  quick: boolean
+  scanLimit: number
+  now: number
+}): Promise<DashboardPayload> {
+  if (quick) {
     const payload = await getQuickDashboard(scanLimit)
     quickCache = { timestamp: now, payload }
     return payload
-  }
-
-  if (!options.force && fullCache && now - fullCache.timestamp < FULL_CACHE_MS && fullCache.payload.scanLimit === scanLimit) {
-    return fullCache.payload
   }
 
   const warnings: DashboardWarning[] = []
@@ -148,13 +240,14 @@ export async function getGithubDashboard(options: {
   const enrichedRepos = repos.map((repo) => toRepoSummary(repo, graphRepoData.get(repo.full_name)))
   const scanRepos = enrichedRepos.slice(0, scanLimit)
 
-  const [commits, runs, pullRequests, issues, billing] = await Promise.all([
-    getRecentCommits(viewer.login, scanRepos, warnings),
+  const [repoDetails, runs, pullRequests, issues, billing] = await Promise.all([
+    getPerRepoLatestDetails(enrichedRepos, warnings, now),
     getWorkflowRuns(scanRepos, warnings),
     getSearchItems(`is:pr involves:${viewer.login} archived:false`, true, warnings),
     getSearchItems(`is:issue involves:${viewer.login} archived:false`, false, warnings),
     getBilling(viewer.login, warnings),
   ])
+  const commits = getRecentCommitsFromRepoDetails(enrichedRepos, repoDetails)
 
   const runsByRepo = new Map<string, WorkflowRunSummary>()
   for (const run of runs) {
@@ -170,6 +263,7 @@ export async function getGithubDashboard(options: {
     viewer,
     repos: enrichedRepos.map((repo) => ({
       ...repo,
+      ...(repoDetails.get(repo.fullName) ?? {}),
       latestRun: runsByRepo.get(repo.fullName) ?? repo.latestRun,
     })),
     recentCommits: commits,
@@ -187,10 +281,8 @@ export async function getGithubDashboard(options: {
 async function getQuickDashboard(scanLimit: number): Promise<DashboardPayload> {
   const warnings: DashboardWarning[] = []
   const viewer = await getViewer()
-  const [repos, billing] = await Promise.all([
-    getRepos(warnings),
-    getBilling(viewer.login, warnings),
-  ])
+  const repos = await getRepos(warnings, { paginate: false, perPage: scanLimit })
+  const now = new Date()
 
   return {
     generatedAt: new Date().toISOString(),
@@ -202,7 +294,11 @@ async function getQuickDashboard(scanLimit: number): Promise<DashboardPayload> {
     pullRequests: [],
     issues: [],
     ciRuns: [],
-    billing,
+    billing: createUnavailableBillingSummary(
+      now.getFullYear(),
+      now.getMonth() + 1,
+      "Billing loads with full dashboard details."
+    ),
     warnings,
   }
 }
@@ -223,12 +319,20 @@ async function getViewer(): Promise<Viewer> {
   }
 }
 
-async function getRepos(warnings: DashboardWarning[]): Promise<RawRepo[]> {
+async function getRepos(
+  warnings: DashboardWarning[],
+  options: { paginate?: boolean; perPage?: number } = {}
+): Promise<RawRepo[]> {
+  const paginate = options.paginate ?? true
+  const perPage = clamp(options.perPage ?? 100, 1, 100)
+  const endpoint = `/user/repos?per_page=${perPage}&sort=pushed&affiliation=owner,collaborator,organization_member`
+
   try {
-    const pages = await ghJson<RawRepo[][]>(
-      "/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member",
-      { paginate: true, slurp: true }
-    )
+    if (!paginate) {
+      return await ghJson<RawRepo[]>(endpoint)
+    }
+
+    const pages = await ghJson<RawRepo[][]>(endpoint, { paginate: true, slurp: true })
     return pages.flat()
   } catch (error) {
     warnings.push(toWarning("repos", error))
@@ -295,34 +399,142 @@ async function getRepoGraphData(
   }
 }
 
-async function getRecentCommits(
-  login: string,
+async function getPerRepoLatestDetails(
   repos: RepoSummary[],
-  warnings: DashboardWarning[]
-): Promise<CommitSummary[]> {
-  const results = await mapLimit(repos, 5, async (repo) => {
-    if (!repo.defaultBranch) return []
-    try {
-      const commits = await ghJson<RawCommit[]>(
-        `/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/commits?author=${encodeURIComponent(login)}&per_page=3`
-      )
-      return commits
-        .map((commit) => toCommitSummary(repo.fullName, commit))
-        .filter((commit): commit is CommitSummary => Boolean(commit))
-    } catch {
-      return []
+  warnings: DashboardWarning[],
+  now: number
+): Promise<Map<string, RepoLatestDetails>> {
+  const cache = await loadRepoDetailsCache()
+  const detailsByRepo = new Map<string, RepoLatestDetails>()
+  let dirty = false
+  let failedRefreshes = 0
+
+  await mapLimit(repos, 4, async (repo) => {
+    const cached = cache.repos[repo.fullName]
+    const activityAt = getRepoActivityAt(repo)
+
+    if (cached && now - cached.refreshedAt < REPO_DETAILS_CACHE_MS) {
+      detailsByRepo.set(repo.fullName, toRepoLatestDetails(cached))
+      return
     }
+
+    if (!isRecentlyActive(activityAt, now)) {
+      detailsByRepo.set(repo.fullName, cached ? toRepoLatestDetails(cached) : emptyRepoLatestDetails())
+      return
+    }
+
+    const [commitResult, pullRequestResult] = await Promise.allSettled([
+      getLatestRepoCommit(repo),
+      getLatestRepoPullRequest(repo),
+    ])
+    if (commitResult.status === "rejected" || pullRequestResult.status === "rejected") {
+      failedRefreshes += 1
+    }
+
+    const details: RepoLatestDetails = {
+      latestCommit: commitResult.status === "fulfilled" ? commitResult.value : cached?.latestCommit ?? null,
+      latestPullRequest: pullRequestResult.status === "fulfilled" ? pullRequestResult.value : cached?.latestPullRequest ?? null,
+    }
+    cache.repos[repo.fullName] = {
+      ...details,
+      refreshedAt: now,
+      activityAt,
+    }
+    dirty = true
+    detailsByRepo.set(repo.fullName, details)
   })
 
-  const commits = results.flat()
-  if (commits.length === 0 && repos.length > 0) {
+  if (dirty) {
+    await writeRepoDetailsCache(cache)
+  }
+
+  if (failedRefreshes > 0) {
     warnings.push({
-      area: "commits",
-      message: "No recent commits were returned from scanned repositories.",
+      area: "repo details",
+      message: `Latest commit or pull request refresh failed for ${failedRefreshes} repositories.`,
     })
   }
 
-  return commits
+  return detailsByRepo
+}
+
+async function getLatestRepoCommit(repo: RepoSummary): Promise<CommitSummary | null> {
+  if (!repo.defaultBranch) return null
+
+  const commits = await ghJson<RawCommit[]>(
+    `/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/commits?per_page=1`
+  )
+  const commit = commits[0]
+  return commit ? toCommitSummary(repo.fullName, commit) : null
+}
+
+async function getLatestRepoPullRequest(repo: RepoSummary): Promise<IssueSummary | null> {
+  const pullRequests = await ghJson<RawPullRequest[]>(
+    `/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/pulls?state=all&sort=updated&direction=desc&per_page=1`
+  )
+  const pullRequest = pullRequests[0]
+  return pullRequest ? toPullRequestSummary(repo.fullName, pullRequest) : null
+}
+
+async function loadRepoDetailsCache(): Promise<RepoDetailsCacheFile> {
+  if (repoDetailsCacheLoaded) return repoDetailsCache
+
+  repoDetailsCacheLoaded = true
+  try {
+    const parsed = JSON.parse(await readFile(REPO_DETAILS_CACHE_PATH, "utf8")) as unknown
+    repoDetailsCache = normalizeRepoDetailsCache(parsed)
+  } catch {
+    repoDetailsCache = createEmptyRepoDetailsCache()
+  }
+
+  return repoDetailsCache
+}
+
+async function writeRepoDetailsCache(cache: RepoDetailsCacheFile) {
+  if (skipRepoDetailsCacheWrites) return
+
+  try {
+    await mkdir(dirname(REPO_DETAILS_CACHE_PATH), { recursive: true })
+    await writeFile(REPO_DETAILS_CACHE_PATH, JSON.stringify(cache, null, 2))
+  } catch {
+    // Repo detail caching is best-effort. A dashboard fetch should still render.
+  }
+}
+
+function getRepoActivityAt(repo: RepoSummary) {
+  const values = [repo.pushedAt, repo.updatedAt]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => Date.parse(value))
+    .filter(Number.isFinite)
+  if (values.length === 0) return null
+  return new Date(Math.max(...values)).toISOString()
+}
+
+function isRecentlyActive(activityAt: string | null, now: number) {
+  return activityAt ? now - Date.parse(activityAt) <= RECENT_REPO_ACTIVITY_MS : false
+}
+
+function emptyRepoLatestDetails(): RepoLatestDetails {
+  return {
+    latestCommit: null,
+    latestPullRequest: null,
+  }
+}
+
+function toRepoLatestDetails(entry: RepoDetailsCacheEntry): RepoLatestDetails {
+  return {
+    latestCommit: entry.latestCommit,
+    latestPullRequest: entry.latestPullRequest,
+  }
+}
+
+function getRecentCommitsFromRepoDetails(
+  repos: RepoSummary[],
+  repoDetails: Map<string, RepoLatestDetails>
+): CommitSummary[] {
+  return repos
+    .map((repo) => repoDetails.get(repo.fullName)?.latestCommit ?? null)
+    .filter((commit): commit is CommitSummary => Boolean(commit))
     .sort((a, b) => Date.parse(b.date) - Date.parse(a.date))
     .slice(0, 30)
 }
@@ -486,6 +698,21 @@ function summarizeBilling(items: BillingUsageItem[], year: number, month: number
   }
 }
 
+function createUnavailableBillingSummary(year: number, month: number, message: string): BillingSummary {
+  return {
+    available: false,
+    year,
+    month,
+    grossAmount: 0,
+    discountAmount: 0,
+    netAmount: 0,
+    unitTotals: [],
+    skus: [],
+    repositories: [],
+    message,
+  }
+}
+
 function toRepoSummary(repo: RawRepo, graph?: GraphRepoNode): RepoSummary {
   return {
     id: repo.id,
@@ -508,6 +735,8 @@ function toRepoSummary(repo: RawRepo, graph?: GraphRepoNode): RepoSummary {
     openIssues: graph?.issues?.totalCount ?? repo.open_issues_count,
     openPullRequests: graph?.pullRequests?.totalCount ?? null,
     checkState: graph?.defaultBranchRef?.target?.statusCheckRollup?.state ?? null,
+    latestCommit: null,
+    latestPullRequest: null,
     latestRun: null,
   }
 }
@@ -544,6 +773,22 @@ function toIssueSummary(item: RawSearchIssue, isPullRequest: boolean): IssueSumm
   }
 }
 
+function toPullRequestSummary(repo: string, item: RawPullRequest): IssueSummary {
+  return {
+    id: item.id,
+    number: item.number,
+    repo,
+    title: item.title,
+    state: item.state,
+    url: item.html_url,
+    updatedAt: item.updated_at,
+    createdAt: item.created_at,
+    author: item.user?.login ?? null,
+    labels: [],
+    isPullRequest: true,
+  }
+}
+
 function toWorkflowRunSummary(repo: string, run: RawWorkflowRun): WorkflowRunSummary {
   return {
     id: run.id,
@@ -571,7 +816,7 @@ async function ghJson<T>(
   if (options.paginate) args.push("--paginate")
   if (options.slurp) args.push("--slurp")
 
-  const stdout = await execGh(args, endpoint)
+  const stdout = await ghExecutor(args, endpoint)
   return JSON.parse(stdout) as T
 }
 
@@ -581,7 +826,7 @@ async function ghGraphql<T>(query: string, fields: Record<string, string | undef
     if (value == null) continue
     args.push("-F", `${key}=${value}`)
   }
-  const stdout = await execGh(args, "graphql")
+  const stdout = await ghExecutor(args, "graphql")
   return JSON.parse(stdout) as T
 }
 
@@ -629,6 +874,68 @@ async function mapLimit<T, R>(
   return results
 }
 
+function createEmptyRepoDetailsCache(): RepoDetailsCacheFile {
+  return {
+    version: 1,
+    repos: {},
+  }
+}
+
+function normalizeRepoDetailsCache(value: unknown): RepoDetailsCacheFile {
+  if (!isRecord(value) || value.version !== 1 || !isRecord(value.repos)) {
+    return createEmptyRepoDetailsCache()
+  }
+
+  const repos: Record<string, RepoDetailsCacheEntry> = {}
+  for (const [repo, entry] of Object.entries(value.repos)) {
+    if (!isRepoDetailsCacheEntry(entry)) continue
+    repos[repo] = entry
+  }
+
+  return {
+    version: 1,
+    repos,
+  }
+}
+
+function isRepoDetailsCacheEntry(value: unknown): value is RepoDetailsCacheEntry {
+  return isRecord(value)
+    && Number.isFinite(value.refreshedAt)
+    && (typeof value.activityAt === "string" || value.activityAt === null)
+    && (value.latestCommit === null || isCommitSummary(value.latestCommit))
+    && (value.latestPullRequest === null || isIssueSummary(value.latestPullRequest))
+}
+
+function isCommitSummary(value: unknown): value is CommitSummary {
+  return isRecord(value)
+    && typeof value.repo === "string"
+    && typeof value.sha === "string"
+    && typeof value.shortSha === "string"
+    && typeof value.message === "string"
+    && (typeof value.author === "string" || value.author === null)
+    && typeof value.date === "string"
+    && typeof value.url === "string"
+}
+
+function isIssueSummary(value: unknown): value is IssueSummary {
+  return isRecord(value)
+    && Number.isFinite(value.id)
+    && Number.isFinite(value.number)
+    && typeof value.repo === "string"
+    && typeof value.title === "string"
+    && typeof value.state === "string"
+    && typeof value.url === "string"
+    && typeof value.updatedAt === "string"
+    && typeof value.createdAt === "string"
+    && (typeof value.author === "string" || value.author === null)
+    && Array.isArray(value.labels)
+    && typeof value.isPullRequest === "boolean"
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
 function toWarning(area: string, error: unknown): DashboardWarning {
   const rawMessage = errorText(error)
   const message =
@@ -649,4 +956,14 @@ function errorText(error: unknown): string {
 function clamp(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min
   return Math.min(max, Math.max(min, value))
+}
+
+export function configureGithubDashboardForTests(executor: GhExecutor | null) {
+  ghExecutor = executor ?? execGh
+  fullCache = null
+  quickCache = null
+  repoDetailsCache = createEmptyRepoDetailsCache()
+  repoDetailsCacheLoaded = Boolean(executor)
+  skipRepoDetailsCacheWrites = Boolean(executor)
+  inFlightDashboards.clear()
 }
