@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { configureGithubDashboardForTests, getGithubDashboard } from "./github-dashboard"
+import { PaginationLimitError } from "./github-client"
 
 type GhCall = {
   args: string[]
@@ -11,16 +12,27 @@ type GhCall = {
 
 type GithubExecutorOptions = {
   repos?: unknown[]
+  reposError?: unknown
+  graphqlError?: unknown
+  graphqlPageSize?: number
   latestCommit?: unknown
   latestPullRequest?: unknown
+  workflowRunsByRepo?: Record<string, unknown[]>
+  workflowRunFailuresByRepo?: Record<string, unknown>
 }
 
 function createGithubExecutor({
   repos = [],
+  reposError,
+  graphqlError,
+  graphqlPageSize,
   latestCommit = createRawCommit("Latest commit"),
   latestPullRequest = createRawPullRequest(),
+  workflowRunsByRepo = {},
+  workflowRunFailuresByRepo = {},
 }: GithubExecutorOptions = {}) {
   const calls: GhCall[] = []
+  let graphqlPage = 0
   const executor = vi.fn(async (args: string[], endpoint: string) => {
     calls.push({ args, endpoint })
     await Promise.resolve()
@@ -35,15 +47,26 @@ function createGithubExecutor({
     }
 
     if (endpoint.startsWith("/user/repos?")) {
+      if (reposError) throw reposError
       return args.includes("--slurp") ? JSON.stringify([repos]) : JSON.stringify(repos)
     }
 
     if (endpoint === "graphql") {
+      if (graphqlError) throw graphqlError
+      const pageIndex = graphqlPage
+      graphqlPage += 1
+      const pageRepos = typeof graphqlPageSize === "number"
+        ? repos.slice(pageIndex * graphqlPageSize, (pageIndex + 1) * graphqlPageSize)
+        : repos
+      const hasNextPage = typeof graphqlPageSize === "number"
+        ? (pageIndex + 1) * graphqlPageSize < repos.length
+        : false
+
       return JSON.stringify({
         data: {
           user: {
             repositories: {
-              nodes: repos.map((repo) => ({
+              nodes: pageRepos.map((repo) => ({
                 nameWithOwner: repoNameWithOwner(repo),
                 pullRequests: { totalCount: 0 },
                 issues: { totalCount: 0 },
@@ -54,8 +77,8 @@ function createGithubExecutor({
                 },
               })),
               pageInfo: {
-                hasNextPage: false,
-                endCursor: null,
+                hasNextPage,
+                endCursor: hasNextPage ? `cursor-${pageIndex + 1}` : null,
               },
             },
           },
@@ -71,8 +94,13 @@ function createGithubExecutor({
       return JSON.stringify(latestPullRequest ? [latestPullRequest] : [])
     }
 
-    if (endpoint.endsWith("/actions/runs?per_page=3")) {
-      return JSON.stringify({ workflow_runs: [] })
+    const workflowRunsEndpoint = endpoint.match(/^\/repos\/([^/]+)\/([^/]+)\/actions\/runs\?per_page=3$/)
+    if (workflowRunsEndpoint) {
+      const fullName = `${decodeURIComponent(workflowRunsEndpoint[1])}/${decodeURIComponent(workflowRunsEndpoint[2])}`
+      if (fullName in workflowRunFailuresByRepo) {
+        throw workflowRunFailuresByRepo[fullName]
+      }
+      return JSON.stringify({ workflow_runs: workflowRunsByRepo[fullName] ?? [] })
     }
 
     if (endpoint.startsWith("/search/issues?")) {
@@ -113,6 +141,21 @@ function createRawRepo(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function createRawRepos(count: number, overrides: Record<string, unknown> = {}) {
+  return Array.from({ length: count }, (_, index) => {
+    const repoNumber = index + 1
+    return createRawRepo({
+      id: repoNumber,
+      name: `repo-${repoNumber}`,
+      full_name: `jskoiz/repo-${repoNumber}`,
+      html_url: `https://github.com/jskoiz/repo-${repoNumber}`,
+      pushed_at: "2000-01-01T00:00:00Z",
+      updated_at: "2000-01-01T00:00:00Z",
+      ...overrides,
+    })
+  })
+}
+
 function createRawCommit(message: string) {
   return {
     sha: "abcdef1234567890",
@@ -137,6 +180,22 @@ function createRawPullRequest() {
     updated_at: "2026-06-10T13:00:00Z",
     created_at: "2026-06-10T11:00:00Z",
     user: { login: "jskoiz" },
+  }
+}
+
+function createRawWorkflowRun(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 900,
+    name: "CI",
+    event: "push",
+    status: "completed",
+    conclusion: "success",
+    head_branch: "main",
+    created_at: "2026-06-10T14:00:00Z",
+    updated_at: "2026-06-10T14:05:00Z",
+    run_started_at: "2026-06-10T14:01:00Z",
+    html_url: "https://github.com/jskoiz/active-repo/actions/runs/900",
+    ...overrides,
   }
 }
 
@@ -229,5 +288,211 @@ describe("getGithubDashboard request coalescing", () => {
     expect(payload.repos[0].latestPullRequest).toBeNull()
     expect(calls.some((call) => call.endpoint.includes("/commits?per_page=1"))).toBe(false)
     expect(calls.some((call) => call.endpoint.includes("/pulls?state=all"))).toBe(false)
+  })
+})
+
+describe("getGithubDashboard pagination completeness", () => {
+  it("keeps partial repo pages when hosted REST pagination reaches the cap", async () => {
+    const repos = [
+      createRawRepo(),
+      createRawRepo({
+        id: 2,
+        name: "partial-repo",
+        full_name: "jskoiz/partial-repo",
+        html_url: "https://github.com/jskoiz/partial-repo",
+      }),
+    ]
+    const { executor } = createGithubExecutor({
+      repos,
+      reposError: new PaginationLimitError("/user/repos", 2, [[repos[0]], [repos[1]]]),
+    })
+    configureGithubDashboardForTests(executor)
+
+    const payload = await getGithubDashboard({ force: true, scanLimit: 8 })
+
+    expect(payload.repos.map((repo) => repo.fullName)).toEqual(["jskoiz/active-repo", "jskoiz/partial-repo"])
+    expect(payload.warnings).toContainEqual({
+      area: "repos",
+      message: "Repository list reached the hosted pagination limit; dashboard data is partial.",
+    })
+  })
+
+  it("fetches enough GraphQL count pages to cover the repo list", async () => {
+    const repos = createRawRepos(201)
+    const { calls, executor } = createGithubExecutor({
+      repos,
+      graphqlPageSize: 50,
+    })
+    configureGithubDashboardForTests(executor)
+
+    await getGithubDashboard({ force: true, scanLimit: 8 })
+
+    expect(calls.filter((call) => call.endpoint === "graphql")).toHaveLength(5)
+  })
+
+  it("keeps small account GraphQL count enrichment to one page", async () => {
+    const repos = createRawRepos(2)
+    const { calls, executor } = createGithubExecutor({
+      repos,
+      graphqlPageSize: 50,
+    })
+    configureGithubDashboardForTests(executor)
+
+    await getGithubDashboard({ force: true, scanLimit: 8 })
+
+    expect(calls.filter((call) => call.endpoint === "graphql")).toHaveLength(1)
+  })
+
+  it("warns and leaves counts unknown when the GraphQL repo-count cap is reached", async () => {
+    const repos = createRawRepos(1001)
+    const { calls, executor } = createGithubExecutor({
+      repos,
+      graphqlPageSize: 50,
+    })
+    configureGithubDashboardForTests(executor)
+
+    const payload = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const lastRepo = payload.repos.find((repo) => repo.fullName === "jskoiz/repo-1001")
+
+    expect(calls.filter((call) => call.endpoint === "graphql")).toHaveLength(20)
+    expect(payload.warnings).toContainEqual({
+      area: "repo counts",
+      message: "Repository count enrichment reached the GraphQL pagination limit; some repository counts are unknown.",
+    })
+    expect(lastRepo).toMatchObject({
+      openIssues: null,
+      openPullRequests: null,
+      checkState: null,
+    })
+  })
+
+  it("does not use REST open issue fallback counts when full GraphQL enrichment fails", async () => {
+    const repos = [createRawRepo({ open_issues_count: 7 })]
+    const { executor } = createGithubExecutor({
+      repos,
+      graphqlError: new Error("GraphQL request failed."),
+    })
+    configureGithubDashboardForTests(executor)
+
+    const payload = await getGithubDashboard({ force: true, scanLimit: 8 })
+
+    expect(payload.repos[0]).toMatchObject({
+      openIssues: null,
+      openPullRequests: null,
+      checkState: null,
+    })
+    expect(payload.warnings.some((warning) => warning.area === "repo counts")).toBe(true)
+  })
+})
+
+describe("getGithubDashboard workflow run warnings", () => {
+  it("keeps successful workflow runs when another repo fails", async () => {
+    const repos = [
+      createRawRepo(),
+      createRawRepo({
+        id: 2,
+        name: "failing-repo",
+        full_name: "jskoiz/failing-repo",
+        html_url: "https://github.com/jskoiz/failing-repo",
+      }),
+    ]
+    const { executor } = createGithubExecutor({
+      repos,
+      workflowRunsByRepo: {
+        "jskoiz/active-repo": [createRawWorkflowRun()],
+      },
+      workflowRunFailuresByRepo: {
+        "jskoiz/failing-repo": new Error("Resource not accessible by integration token ghp_fake_secret"),
+      },
+    })
+    configureGithubDashboardForTests(executor)
+
+    const payload = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const ciWarnings = payload.warnings.filter((warning) => warning.area === "ci")
+
+    expect(payload.ciRuns.map((run) => run.repo)).toEqual(["jskoiz/active-repo"])
+    expect(payload.repos.find((repo) => repo.fullName === "jskoiz/active-repo")?.latestRun?.name).toBe("CI")
+    expect(ciWarnings.map((warning) => warning.message)).toContain(
+      "Workflow runs could not be loaded for 1 of 2 scanned repositories: jskoiz/failing-repo."
+    )
+    expect(ciWarnings.map((warning) => warning.message).join("\n")).not.toContain("ghp_fake_secret")
+  })
+
+  it("reports all workflow run fetch failures separately from empty runs", async () => {
+    const repos = [
+      createRawRepo(),
+      createRawRepo({
+        id: 2,
+        name: "failing-repo",
+        full_name: "jskoiz/failing-repo",
+        html_url: "https://github.com/jskoiz/failing-repo",
+      }),
+    ]
+    const { executor } = createGithubExecutor({
+      repos,
+      workflowRunFailuresByRepo: {
+        "jskoiz/active-repo": new Error("HTTP 403 ghp_fake_secret"),
+        "jskoiz/failing-repo": new Error("HTTP 500 ghp_fake_secret"),
+      },
+    })
+    configureGithubDashboardForTests(executor)
+
+    const payload = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const ciMessages = payload.warnings
+      .filter((warning) => warning.area === "ci")
+      .map((warning) => warning.message)
+
+    expect(payload.ciRuns).toEqual([])
+    expect(ciMessages).toContain(
+      "Workflow runs could not be loaded for 2 of 2 scanned repositories: jskoiz/active-repo, jskoiz/failing-repo."
+    )
+    expect(ciMessages).toContain("No workflow runs were returned from scanned repositories.")
+    expect(ciMessages[0]).not.toBe("No workflow runs were returned from scanned repositories.")
+    expect(ciMessages.join("\n")).not.toContain("ghp_fake_secret")
+  })
+
+  it("limits workflow run failure warnings to three repo names", async () => {
+    const repos = [
+      createRawRepo(),
+      createRawRepo({
+        id: 2,
+        name: "repo-two",
+        full_name: "jskoiz/repo-two",
+        html_url: "https://github.com/jskoiz/repo-two",
+      }),
+      createRawRepo({
+        id: 3,
+        name: "repo-three",
+        full_name: "jskoiz/repo-three",
+        html_url: "https://github.com/jskoiz/repo-three",
+      }),
+      createRawRepo({
+        id: 4,
+        name: "repo-four",
+        full_name: "jskoiz/repo-four",
+        html_url: "https://github.com/jskoiz/repo-four",
+      }),
+    ]
+    const { executor } = createGithubExecutor({
+      repos,
+      workflowRunFailuresByRepo: {
+        "jskoiz/active-repo": new Error("HTTP 403 ghp_fake_secret"),
+        "jskoiz/repo-two": new Error("HTTP 403 ghp_fake_secret"),
+        "jskoiz/repo-three": new Error("HTTP 403 ghp_fake_secret"),
+        "jskoiz/repo-four": new Error("HTTP 403 ghp_fake_secret"),
+      },
+    })
+    configureGithubDashboardForTests(executor)
+
+    const payload = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const ciMessages = payload.warnings
+      .filter((warning) => warning.area === "ci")
+      .map((warning) => warning.message)
+
+    expect(ciMessages).toContain(
+      "Workflow runs could not be loaded for 4 of 4 scanned repositories: jskoiz/active-repo, jskoiz/repo-two, jskoiz/repo-three, and 1 more."
+    )
+    expect(ciMessages.join("\n")).not.toContain("jskoiz/repo-four")
+    expect(ciMessages.join("\n")).not.toContain("ghp_fake_secret")
   })
 })

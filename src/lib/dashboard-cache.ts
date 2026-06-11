@@ -24,6 +24,16 @@ export function writeDashboardCache(payload: DashboardPayload) {
   writeDashboardCacheToStorage(window.sessionStorage, payload)
 }
 
+export function clearDashboardCache() {
+  if (typeof window === "undefined") return
+
+  try {
+    window.sessionStorage.removeItem(DASHBOARD_CACHE_KEY)
+  } catch {
+    // Ignore storage access errors; cache cleanup must not block auth recovery.
+  }
+}
+
 export function isDashboardCacheFresh(entry: DashboardCacheEntry) {
   return Date.now() - entry.cachedAt <= DASHBOARD_CACHE_MAX_AGE_MS
 }

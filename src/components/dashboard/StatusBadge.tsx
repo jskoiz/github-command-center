@@ -54,6 +54,6 @@ function renderCompactIcon(tone: GithubStatusTone) {
   if (tone === "success") return <CheckCircle2Icon className="size-4" aria-hidden="true" />
   if (tone === "danger") return <XCircleIcon className="size-4" aria-hidden="true" />
   if (tone === "warning") return <Clock3Icon className="size-4" aria-hidden="true" />
-  if (tone === "running") return <LoaderCircleIcon className="size-4" aria-hidden="true" />
+  if (tone === "running") return <LoaderCircleIcon className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
   return <CircleDotIcon className="size-4" aria-hidden="true" />
 }

@@ -26,6 +26,11 @@ export function DashboardSkeleton() {
           <Skeleton className="h-8 w-28 rounded-lg" />
         </div>
         <div className="flex min-h-0 flex-col gap-3 p-3 lg:h-[calc(100vh-3.5rem)] lg:overflow-hidden">
+          <div className="grid shrink-0 grid-cols-2 gap-2 lg:grid-cols-4">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <Skeleton key={index} className="h-12 w-full rounded-lg" />
+            ))}
+          </div>
           <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
             <div className="grid min-h-0 gap-3 lg:grid-rows-[minmax(0,1fr)_190px]">
               <Card className="min-h-0 gap-0 rounded-lg py-0 lg:h-full">
@@ -38,23 +43,23 @@ export function DashboardSkeleton() {
                   ))}
                 </CardContent>
               </Card>
-              <div className="grid min-h-0 gap-3 overflow-hidden lg:h-full lg:grid-cols-3">
-                {Array.from({ length: 3 }).map((_, index) => (
-                  <Card key={index} size="sm" className="h-48 gap-0 rounded-lg py-0 lg:h-full">
-                    <CardHeader className="min-h-9 border-b px-3 py-1.5 [.border-b]:pb-1.5">
-                      <Skeleton className="h-4 w-24" />
-                    </CardHeader>
-                    <CardContent className="flex min-h-0 flex-1 flex-col gap-1 overflow-hidden px-2 py-1.5">
-                      {Array.from({ length: 4 }).map((_, rowIndex) => (
-                        <Skeleton key={rowIndex} className="h-6 w-full" />
-                      ))}
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
+              <Card size="sm" className="h-48 gap-0 rounded-lg py-0 lg:h-full">
+                <CardHeader className="min-h-9 border-b px-3 py-1.5 [.border-b]:pb-1.5">
+                  <div className="flex gap-2">
+                    <Skeleton className="h-5 w-28" />
+                    <Skeleton className="h-5 w-20" />
+                    <Skeleton className="h-5 w-24" />
+                  </div>
+                </CardHeader>
+                <CardContent className="grid min-h-0 flex-1 grid-cols-1 gap-1 overflow-hidden px-2 py-1.5 md:grid-cols-2">
+                  {Array.from({ length: 6 }).map((_, rowIndex) => (
+                    <Skeleton key={rowIndex} className="h-6 w-full" />
+                  ))}
+                </CardContent>
+              </Card>
             </div>
             <div className="hidden min-h-0 flex-col gap-3 lg:flex">
-              {Array.from({ length: 3 }).map((_, index) => (
+              {Array.from({ length: 2 }).map((_, index) => (
                 <Card key={index} size="sm" className="gap-0 rounded-lg py-0">
                   <CardHeader className="min-h-10 border-b px-3 py-2 [.border-b]:pb-2">
                     <Skeleton className="h-4 w-36" />

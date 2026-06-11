@@ -9,6 +9,8 @@ import {
   ChevronRightIcon,
   Columns3Icon,
   ExternalLinkIcon,
+  EyeIcon,
+  EyeOffIcon,
   GripVerticalIcon,
   RotateCcwIcon,
 } from "lucide-react"
@@ -43,6 +45,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import type { RepoScope } from "@/App"
 import { formatCompactNumber, formatDecimal, formatDuration, formatRelative } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import type { RepoSummary } from "@/types/github"
@@ -121,7 +124,7 @@ const COLUMN_DEFS: RepoColumn[] = [
   { key: "pushedAt", label: "Pushed", sortKey: "pushedAt", width: 112, minWidth: 96, maxWidth: 220, cellClassName: "text-muted-foreground" },
   { key: "updatedAt", label: "Updated", sortKey: "updatedAt", width: 112, minWidth: 96, maxWidth: 220, cellClassName: "text-muted-foreground" },
   { key: "lastCommit", label: "Commit", sortKey: "lastCommitAt", width: 288, minWidth: 192, maxWidth: 560, cellClassName: "text-muted-foreground" },
-  { key: "lastPullRequest", label: "PR / CI", sortKey: "lastPullRequestAt", width: 304, minWidth: 216, maxWidth: 600, cellClassName: "text-muted-foreground" },
+  { key: "lastPullRequest", label: "Last PR", sortKey: "lastPullRequestAt", width: 304, minWidth: 216, maxWidth: 600, cellClassName: "text-muted-foreground" },
   { key: "latestRun", label: "Run", width: 240, minWidth: 176, maxWidth: 520, cellClassName: "text-muted-foreground" },
   { key: "sizeKb", label: "Size", sortKey: "sizeKb", align: "right", width: 88, minWidth: 72, maxWidth: 180, cellClassName: "text-right font-mono" },
   { key: "defaultBranch", label: "Branch", sortKey: "defaultBranch", width: 136, minWidth: 104, maxWidth: 260, cellClassName: "font-mono text-muted-foreground" },
@@ -165,6 +168,13 @@ export function RepoTable({
   pageSize,
   sort,
   viewerLogin,
+  hasActiveFilters,
+  scope,
+  activeCount,
+  hiddenCount,
+  onScopeChange,
+  onToggleRepoHidden,
+  onClearFilters,
   onPageChange,
   onPageSizeChange,
   onSort,
@@ -176,6 +186,13 @@ export function RepoTable({
   pageSize: number
   sort: RepoSort
   viewerLogin: string
+  hasActiveFilters?: boolean
+  scope?: RepoScope
+  activeCount?: number
+  hiddenCount?: number
+  onScopeChange?: (value: RepoScope) => void
+  onToggleRepoHidden?: (id: number) => void
+  onClearFilters?: () => void
   onPageChange: (pageIndex: number) => void
   onPageSizeChange: (pageSize: number) => void
   onSort: (key: RepoSortKey) => void
@@ -343,11 +360,44 @@ export function RepoTable({
           <Badge variant="outline" className="h-5 px-1.5 font-mono">
             {filteredCount}
           </Badge>
+          {onScopeChange ? (
+            <div role="group" aria-label="Repository scope" className="flex items-center gap-0.5 rounded-md border bg-muted/30 p-0.5">
+              <Button
+                variant={scope === "active" ? "secondary" : "ghost"}
+                size="xs"
+                className="h-5 px-1.5 text-[11px]"
+                aria-pressed={scope === "active"}
+                onClick={() => onScopeChange("active")}
+              >
+                Active {activeCount ?? 0}
+              </Button>
+              <Button
+                variant={scope === "all" ? "secondary" : "ghost"}
+                size="xs"
+                className="h-5 px-1.5 text-[11px]"
+                aria-pressed={scope === "all"}
+                onClick={() => onScopeChange("all")}
+              >
+                All {totalCount}
+              </Button>
+              {(hiddenCount ?? 0) > 0 || scope === "hidden" ? (
+                <Button
+                  variant={scope === "hidden" ? "secondary" : "ghost"}
+                  size="xs"
+                  className="h-5 px-1.5 text-[11px]"
+                  aria-pressed={scope === "hidden"}
+                  onClick={() => onScopeChange("hidden")}
+                >
+                  Hidden {hiddenCount ?? 0}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
         </CardTitle>
         <CardAction>
-          <div className="hidden items-center gap-2 sm:flex">
+          <div className="flex items-center gap-2">
             <Select value={String(pageSize)} onValueChange={(value) => onPageSizeChange(Number(value))}>
-              <SelectTrigger size="sm" className="w-24">
+              <SelectTrigger size="sm" className="hidden w-24 sm:flex">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -363,7 +413,8 @@ export function RepoTable({
               <DropdownMenuTrigger asChild>
                 <Button variant="outline" size="sm">
                   <Columns3Icon data-icon="inline-start" />
-                  Columns
+                  <span className="hidden sm:inline">Columns</span>
+                  <span className="sr-only sm:hidden">Columns</span>
                   <ChevronDownIcon data-icon="inline-end" />
                 </Button>
               </DropdownMenuTrigger>
@@ -424,7 +475,7 @@ export function RepoTable({
                 </div>
               </DropdownMenuContent>
             </DropdownMenu>
-            <Badge variant="outline" className="h-6 px-2 font-mono">
+            <Badge variant="outline" className="hidden h-6 px-2 font-mono md:inline-flex">
               live gh
             </Badge>
           </div>
@@ -468,7 +519,7 @@ export function RepoTable({
             </TableHeader>
             <TableBody>
               {repos.map((repo) => (
-                <TableRow key={repo.id} className="h-9 hover:bg-muted/40">
+                <TableRow key={repo.id} className="group h-11 hover:bg-muted/40">
                   {renderedColumns.map((column) => (
                     <RepoCell
                       key={column.key}
@@ -476,12 +527,39 @@ export function RepoTable({
                       width={getColumnWidth(columnWidths, column.key)}
                       repo={repo}
                       viewerLogin={viewerLogin}
+                      isHiddenScope={scope === "hidden"}
+                      onToggleRepoHidden={onToggleRepoHidden}
                     />
                   ))}
                 </TableRow>
               ))}
             </TableBody>
           </Table>
+          {repos.length === 0 ? (
+            <div className="sticky left-0 flex flex-col items-center gap-2 px-4 py-10 text-sm text-muted-foreground">
+              <span>
+                {hasActiveFilters
+                  ? "No repositories match the current filters."
+                  : scope === "hidden"
+                    ? "No hidden repositories."
+                    : scope === "active" && totalCount > 0
+                      ? "No repositories with recent activity."
+                      : "No repositories found."}
+              </span>
+              <div className="flex items-center gap-2">
+                {hasActiveFilters && onClearFilters ? (
+                  <Button variant="outline" size="sm" onClick={onClearFilters}>
+                    Clear filters
+                  </Button>
+                ) : null}
+                {scope === "active" && totalCount > 0 && onScopeChange ? (
+                  <Button variant="outline" size="sm" onClick={() => onScopeChange("all")}>
+                    Show all {totalCount}
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </div>
         <div className="flex min-h-9 items-center justify-between gap-3 border-t bg-muted/20 px-3 py-1 text-xs text-muted-foreground">
           <div className="hidden sm:block">
@@ -506,7 +584,7 @@ export function RepoTable({
               <ChevronLeftIcon data-icon="inline-start" />
               <span className="sr-only">Previous page</span>
             </Button>
-            {Array.from({ length: Math.min(3, pageCount) }, (_, index) => {
+            {pageCount > 1 && Array.from({ length: Math.min(3, pageCount) }, (_, index) => {
               const start = Math.min(Math.max(0, pageIndex - 1), Math.max(0, pageCount - 3))
               const page = start + index
               return (
@@ -578,6 +656,7 @@ function RepoHead({
     <TableHead
       className={headerClassName}
       style={headerStyle}
+      aria-sort={active ? (sort.direction === "asc" ? "ascending" : "descending") : undefined}
       data-column-key={column.key}
       onDragOver={(event) => onColumnDragOver(column.key, event)}
       onDrop={(event) => onColumnDrop(column.key, event)}
@@ -650,18 +729,22 @@ function RepoCell({
   width,
   repo,
   viewerLogin,
+  isHiddenScope,
+  onToggleRepoHidden,
 }: {
   column: RepoColumn
   width: number
   repo: RepoSummary
   viewerLogin: string
+  isHiddenScope?: boolean
+  onToggleRepoHidden?: (id: number) => void
 }) {
   return (
     <TableCell
-      className={cn("h-9 overflow-hidden px-2 py-0 align-middle text-ellipsis", column.cellClassName)}
+      className={cn("h-11 overflow-hidden px-2 py-0 align-middle text-ellipsis", column.cellClassName)}
       style={{ width, minWidth: column.minWidth, maxWidth: column.maxWidth }}
     >
-      {renderRepoCell(column.key, repo, viewerLogin)}
+      {renderRepoCell(column.key, repo, viewerLogin, isHiddenScope, onToggleRepoHidden)}
     </TableCell>
   )
 }
@@ -669,20 +752,43 @@ function RepoCell({
 function renderRepoCell(
   key: RepoColumnKey,
   repo: RepoSummary,
-  viewerLogin: string
+  viewerLogin: string,
+  isHiddenScope?: boolean,
+  onToggleRepoHidden?: (id: number) => void
 ) {
   if (key === "repo") {
     return (
-      <a
-        href={repo.url}
-        target="_blank"
-        rel="noreferrer"
-        className="group flex min-w-0 max-w-full items-center gap-1.5 rounded-sm font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-        title={repo.fullName}
-      >
-        <span className="truncate">{displayRepoName(repo, viewerLogin)}</span>
-        <ExternalLinkIcon className="size-3 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" aria-hidden="true" />
-      </a>
+      <div className="flex min-w-0 max-w-full items-center gap-1.5">
+        <StatusBadge
+          compact
+          state={repo.latestRun?.conclusion ?? repo.latestRun?.status ?? repo.checkState}
+          className="size-4 shrink-0 [&>svg]:size-3"
+        />
+        <a
+          href={repo.url}
+          target="_blank"
+          rel="noreferrer"
+          className="group/link flex min-w-0 items-center gap-1.5 rounded-sm font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          title={repo.fullName}
+        >
+          <span className="truncate">{displayRepoName(repo, viewerLogin)}</span>
+          <ExternalLinkIcon className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/link:opacity-100" aria-hidden="true" />
+        </a>
+        {onToggleRepoHidden ? (
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            className="ml-auto shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-60 hover:opacity-100 hover:text-foreground focus-visible:opacity-100"
+            title={isHiddenScope ? "Unhide repository" : "Hide repository"}
+            onClick={() => onToggleRepoHidden(repo.id)}
+          >
+            {isHiddenScope
+              ? <EyeIcon className="size-3.5" aria-hidden="true" />
+              : <EyeOffIcon className="size-3.5" aria-hidden="true" />}
+            <span className="sr-only">{isHiddenScope ? "Unhide" : "Hide"} {repo.name}</span>
+          </Button>
+        ) : null}
+      </div>
     )
   }
 
@@ -716,45 +822,38 @@ function renderRepoCell(
         href={latestCommit.url}
         target="_blank"
         rel="noreferrer"
-        className="flex min-w-0 max-w-full items-center gap-1.5 rounded-sm whitespace-nowrap outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+        className="flex min-w-0 max-w-full flex-col justify-center rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
         title={`${latestCommit.message} · ${formatRelative(latestCommit.date)}`}
       >
-        <span className="min-w-0 truncate text-foreground">{latestCommit.message}</span>
-        <span className="shrink-0 font-mono text-[11px]">{latestCommit.shortSha}</span>
-        <span className="shrink-0 text-[11px]">{formatRelative(latestCommit.date)}</span>
+        <span className="min-w-0 truncate leading-4 text-foreground">{latestCommit.message}</span>
+        <span className="truncate text-[11px] leading-4 text-muted-foreground">
+          <span className="font-mono">{latestCommit.shortSha}</span> · {formatRelative(latestCommit.date)}
+        </span>
       </a>
     )
   }
 
   if (key === "lastPullRequest") {
     const latestPullRequest = repo.latestPullRequest
-    const status = repo.latestRun?.conclusion ?? repo.latestRun?.status ?? repo.checkState
-
-    if (!latestPullRequest) {
-      return (
-        <div className="flex min-w-0 max-w-full items-center gap-1.5">
-          <StatusBadge compact state={status} />
-          <EmptyValue />
-        </div>
-      )
-    }
+    if (!latestPullRequest) return <EmptyValue />
 
     return (
-      <div className="flex min-w-0 max-w-full items-center gap-1.5">
-        <StatusBadge compact state={status} />
-        <a
-          href={latestPullRequest.url}
-          target="_blank"
-          rel="noreferrer"
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm whitespace-nowrap outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-          title={`#${latestPullRequest.number} ${latestPullRequest.title} · ${formatRelative(latestPullRequest.updatedAt)}`}
-        >
-          <span className="shrink-0 font-mono text-[11px]">#{latestPullRequest.number}</span>
-          <span className="min-w-0 truncate text-foreground">{latestPullRequest.title}</span>
-          <span className="shrink-0 rounded-sm border bg-muted/70 px-1 py-px text-[10px] leading-none text-muted-foreground capitalize">{latestPullRequest.state}</span>
-          <span className="shrink-0 text-[11px]">{formatRelative(latestPullRequest.updatedAt)}</span>
-        </a>
-      </div>
+      <a
+        href={latestPullRequest.url}
+        target="_blank"
+        rel="noreferrer"
+        className="flex min-w-0 max-w-full flex-col justify-center rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+        title={`#${latestPullRequest.number} ${latestPullRequest.title} · ${latestPullRequest.state} · ${formatRelative(latestPullRequest.updatedAt)}`}
+      >
+        <span className="min-w-0 truncate leading-4 text-foreground">{latestPullRequest.title}</span>
+        <span className="truncate text-[11px] leading-4 text-muted-foreground">
+          <span className="font-mono">#{latestPullRequest.number}</span>
+          {" · "}
+          <span className={cn("capitalize", pullRequestStateClassName(latestPullRequest.state))}>{latestPullRequest.state}</span>
+          {" · "}
+          {formatRelative(latestPullRequest.updatedAt)}
+        </span>
+      </a>
     )
   }
 
@@ -772,6 +871,12 @@ function renderRepoCell(
   if (key === "defaultBranch") return repo.defaultBranch ?? <EmptyValue />
 
   return null
+}
+
+function pullRequestStateClassName(state: string) {
+  if (state === "open") return "text-status-success"
+  if (state === "merged") return "text-status-info"
+  return "text-muted-foreground"
 }
 
 function EmptyValue() {

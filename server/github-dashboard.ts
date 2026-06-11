@@ -1,6 +1,9 @@
+import { AsyncLocalStorage } from "node:async_hooks"
 import { execFile } from "node:child_process"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
+
+import { createTokenExecutor, isPaginationLimitError, type GhExecutor } from "./github-client.ts"
 import type {
   BillingRepoSummary,
   BillingSkuSummary,
@@ -15,7 +18,7 @@ import type {
   WorkflowRunSummary,
 } from "../src/types/github"
 
-const GH_BIN = process.env.GH_BIN || "/Users/jk/.local/bin/gh"
+const GH_BIN = process.env.GH_BIN || "gh"
 const API_VERSION = "2026-03-10"
 const FULL_CACHE_MS = 5 * 60_000
 const QUICK_CACHE_MS = 60_000
@@ -24,26 +27,52 @@ const RECENT_REPO_ACTIVITY_MS = 7 * 24 * 60 * 60_000
 const REPO_DETAILS_CACHE_PATH = process.env.GITHUB_COMMAND_CENTER_REPO_CACHE
   || join(process.cwd(), ".cache", "github-command-center", "repo-details.json")
 const MAX_BUFFER = 32 * 1024 * 1024
+const GRAPHQL_REPO_PAGE_SIZE = 50
+const MAX_GRAPHQL_REPO_PAGES = 20
 
 type CacheEntry = {
   timestamp: number
   payload: DashboardPayload
 }
 
-let fullCache: CacheEntry | null = null
-let quickCache: CacheEntry | null = null
+const LOCAL_CACHE_KEY = "local"
+const MAX_CACHED_USERS = 200
+
+const fullCaches = new Map<string, CacheEntry>()
+const quickCaches = new Map<string, CacheEntry>()
 const inFlightDashboards = new Map<string, Promise<DashboardPayload>>()
-let repoDetailsCache = createEmptyRepoDetailsCache()
-let repoDetailsCacheLoaded = false
+const repoDetailsCaches = new Map<string, RepoDetailsCacheFile>()
+let localRepoDetailsCacheLoaded = false
 let skipRepoDetailsCacheWrites = false
+
+type AuthContext = {
+  executor: GhExecutor
+  cacheKey: string
+}
+
+const authContext = new AsyncLocalStorage<AuthContext>()
+
+function currentExecutor(): GhExecutor {
+  return authContext.getStore()?.executor ?? ghExecutor
+}
+
+function currentCacheKey(): string {
+  return authContext.getStore()?.cacheKey ?? LOCAL_CACHE_KEY
+}
+
+function boundedMapSet<T>(map: Map<string, T>, key: string, value: T) {
+  if (!map.has(key) && map.size >= MAX_CACHED_USERS) {
+    const oldest = map.keys().next().value
+    if (oldest !== undefined) map.delete(oldest)
+  }
+  map.set(key, value)
+}
 
 type GhError = Error & {
   stderr?: string
   stdout?: string
   endpoint?: string
 }
-
-type GhExecutor = (args: string[], endpoint: string) => Promise<string>
 
 let ghExecutor: GhExecutor = execGh
 
@@ -80,6 +109,7 @@ type RawSearchIssue = {
   user?: { login: string }
   labels?: Array<{ name: string }>
   pull_request?: unknown
+  draft?: boolean
 }
 
 type RawCommit = {
@@ -103,6 +133,7 @@ type RawPullRequest = {
   updated_at: string
   created_at: string
   user?: { login: string }
+  draft?: boolean
 }
 
 type RawWorkflowRun = {
@@ -116,6 +147,12 @@ type RawWorkflowRun = {
   updated_at: string
   run_started_at: string | null
   html_url: string
+}
+
+type WorkflowRunFetchResult = {
+  repo: string
+  runs: WorkflowRunSummary[]
+  error?: unknown
 }
 
 type GraphRepoNode = {
@@ -157,7 +194,28 @@ type RepoDetailsCacheFile = {
   repos: Record<string, RepoDetailsCacheEntry>
 }
 
+export type DashboardAuth = {
+  token: string
+  userKey: string
+}
+
 export async function getGithubDashboard(options: {
+  force?: boolean
+  quick?: boolean
+  scanLimit?: number
+  auth?: DashboardAuth
+} = {}): Promise<DashboardPayload> {
+  if (options.auth) {
+    const context: AuthContext = {
+      executor: createTokenExecutor(options.auth.token),
+      cacheKey: `user:${options.auth.userKey}`,
+    }
+    return authContext.run(context, () => getGithubDashboardInner(options))
+  }
+  return getGithubDashboardInner(options)
+}
+
+async function getGithubDashboardInner(options: {
   force?: boolean
   quick?: boolean
   scanLimit?: number
@@ -172,7 +230,7 @@ export async function getGithubDashboard(options: {
     return cached
   }
 
-  const inFlightKey = `${quick ? "quick" : "full"}:${scanLimit}:${force ? "force" : "normal"}`
+  const inFlightKey = `${currentCacheKey()}:${quick ? "quick" : "full"}:${scanLimit}:${force ? "force" : "normal"}`
   const existing = inFlightDashboards.get(inFlightKey)
   if (existing) return existing
 
@@ -200,6 +258,9 @@ function getCachedDashboard({
   now: number
 }): DashboardPayload | null {
   if (force) return null
+
+  const fullCache = fullCaches.get(currentCacheKey())
+  const quickCache = quickCaches.get(currentCacheKey())
 
   if (quick) {
     if (fullCache && now - fullCache.timestamp < FULL_CACHE_MS && fullCache.payload.scanLimit === scanLimit) {
@@ -229,15 +290,17 @@ async function loadGithubDashboard({
 }): Promise<DashboardPayload> {
   if (quick) {
     const payload = await getQuickDashboard(scanLimit)
-    quickCache = { timestamp: now, payload }
+    boundedMapSet(quickCaches, currentCacheKey(), { timestamp: now, payload })
     return payload
   }
 
   const warnings: DashboardWarning[] = []
   const viewer = await getViewer()
   const repos = await getRepos(warnings)
-  const graphRepoData = await getRepoGraphData(viewer.login, warnings)
-  const enrichedRepos = repos.map((repo) => toRepoSummary(repo, graphRepoData.get(repo.full_name)))
+  const graphRepoData = await getRepoGraphData(viewer.login, repos.length, warnings)
+  const enrichedRepos = repos.map((repo) => toRepoSummary(repo, graphRepoData.get(repo.full_name), {
+    useRestIssueFallback: false,
+  }))
   const scanRepos = enrichedRepos.slice(0, scanLimit)
 
   const [repoDetails, runs, pullRequests, issues, billing] = await Promise.all([
@@ -274,7 +337,7 @@ async function loadGithubDashboard({
     warnings,
   }
 
-  fullCache = { timestamp: now, payload }
+  boundedMapSet(fullCaches, currentCacheKey(), { timestamp: now, payload })
   return payload
 }
 
@@ -335,6 +398,13 @@ async function getRepos(
     const pages = await ghJson<RawRepo[][]>(endpoint, { paginate: true, slurp: true })
     return pages.flat()
   } catch (error) {
+    if (isPaginationLimitError(error)) {
+      warnings.push({
+        area: "repos",
+        message: "Repository list reached the hosted pagination limit; dashboard data is partial.",
+      })
+      return flattenRepoPages(error.partialPages)
+    }
     warnings.push(toWarning("repos", error))
     return []
   }
@@ -342,6 +412,7 @@ async function getRepos(
 
 async function getRepoGraphData(
   login: string,
+  repoCount: number,
   warnings: DashboardWarning[]
 ): Promise<Map<string, GraphRepoNode>> {
   const query = `query($login:String!,$first:Int!,$after:String){
@@ -369,9 +440,11 @@ async function getRepoGraphData(
 
   const nodes: GraphRepoNode[] = []
   let after: string | undefined
+  const requestedPages = Math.max(1, Math.ceil(repoCount / GRAPHQL_REPO_PAGE_SIZE))
+  const maxPages = Math.min(requestedPages, MAX_GRAPHQL_REPO_PAGES)
 
   try {
-    for (let page = 0; page < 4; page += 1) {
+    for (let page = 0; page < maxPages; page += 1) {
       const raw = await ghGraphql<{
         data?: {
           user?: {
@@ -384,12 +457,19 @@ async function getRepoGraphData(
             }
           }
         }
-      }>(query, { login, first: "50", after })
+      }>(query, { login, first: String(GRAPHQL_REPO_PAGE_SIZE), after })
 
       const repositories = raw.data?.user?.repositories
       nodes.push(...(repositories?.nodes ?? []))
-      if (!repositories?.pageInfo?.hasNextPage || !repositories.pageInfo.endCursor) break
-      after = repositories.pageInfo.endCursor
+      const pageInfo = repositories?.pageInfo
+      if (page === maxPages - 1 && pageInfo?.hasNextPage) {
+        warnings.push({
+          area: "repo counts",
+          message: "Repository count enrichment reached the GraphQL pagination limit; some repository counts are unknown.",
+        })
+      }
+      if (!pageInfo?.hasNextPage || !pageInfo.endCursor) break
+      after = pageInfo.endCursor
     }
 
     return new Map(nodes.map((node) => [node.nameWithOwner, node]))
@@ -397,6 +477,10 @@ async function getRepoGraphData(
     warnings.push(toWarning("repo counts", error))
     return new Map(nodes.map((node) => [node.nameWithOwner, node]))
   }
+}
+
+function flattenRepoPages(pages: unknown[]): RawRepo[] {
+  return pages.flatMap((page) => Array.isArray(page) ? page as RawRepo[] : [])
 }
 
 async function getPerRepoLatestDetails(
@@ -477,21 +561,31 @@ async function getLatestRepoPullRequest(repo: RepoSummary): Promise<IssueSummary
 }
 
 async function loadRepoDetailsCache(): Promise<RepoDetailsCacheFile> {
-  if (repoDetailsCacheLoaded) return repoDetailsCache
+  const key = currentCacheKey()
+  const existing = repoDetailsCaches.get(key)
+  if (existing && (key !== LOCAL_CACHE_KEY || localRepoDetailsCacheLoaded)) return existing
 
-  repoDetailsCacheLoaded = true
-  try {
-    const parsed = JSON.parse(await readFile(REPO_DETAILS_CACHE_PATH, "utf8")) as unknown
-    repoDetailsCache = normalizeRepoDetailsCache(parsed)
-  } catch {
-    repoDetailsCache = createEmptyRepoDetailsCache()
+  if (key !== LOCAL_CACHE_KEY) {
+    const created = createEmptyRepoDetailsCache()
+    boundedMapSet(repoDetailsCaches, key, created)
+    return created
   }
 
-  return repoDetailsCache
+  localRepoDetailsCacheLoaded = true
+  let cache: RepoDetailsCacheFile
+  try {
+    const parsed = JSON.parse(await readFile(REPO_DETAILS_CACHE_PATH, "utf8")) as unknown
+    cache = normalizeRepoDetailsCache(parsed)
+  } catch {
+    cache = createEmptyRepoDetailsCache()
+  }
+  repoDetailsCaches.set(LOCAL_CACHE_KEY, cache)
+  return cache
 }
 
 async function writeRepoDetailsCache(cache: RepoDetailsCacheFile) {
-  if (skipRepoDetailsCacheWrites) return
+  // Hosted users keep repo details in memory only; the disk cache is for local mode.
+  if (skipRepoDetailsCacheWrites || currentCacheKey() !== LOCAL_CACHE_KEY) return
 
   try {
     await mkdir(dirname(REPO_DETAILS_CACHE_PATH), { recursive: true })
@@ -543,18 +637,39 @@ async function getWorkflowRuns(
   repos: RepoSummary[],
   warnings: DashboardWarning[]
 ): Promise<WorkflowRunSummary[]> {
-  const results = await mapLimit(repos, 5, async (repo) => {
+  const results = await mapLimit(repos, 5, async (repo): Promise<WorkflowRunFetchResult> => {
     try {
       const raw = await ghJson<{ workflow_runs?: RawWorkflowRun[] }>(
         `/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/actions/runs?per_page=3`
       )
-      return (raw.workflow_runs ?? []).map((run) => toWorkflowRunSummary(repo.fullName, run))
-    } catch {
-      return []
+      return {
+        repo: repo.fullName,
+        runs: (raw.workflow_runs ?? []).map((run) => toWorkflowRunSummary(repo.fullName, run)),
+      }
+    } catch (error) {
+      return {
+        repo: repo.fullName,
+        runs: [],
+        error: error ?? "Workflow run request failed.",
+      }
     }
   })
 
-  const runs = results.flat()
+  const failedResults = results.filter((result) => result.error !== undefined)
+  const runs = results.flatMap((result) => result.runs)
+
+  if (failedResults.length > 0) {
+    const repoNames = failedResults.slice(0, 3).map((result) => result.repo).join(", ")
+    const hiddenCount = failedResults.length - 3
+    const hiddenSuffix = hiddenCount > 0 ? `, and ${hiddenCount} more` : ""
+    const repositoryLabel = repos.length === 1 ? "repository" : "repositories"
+
+    warnings.push({
+      area: "ci",
+      message: `Workflow runs could not be loaded for ${failedResults.length} of ${repos.length} scanned ${repositoryLabel}: ${repoNames}${hiddenSuffix}.`,
+    })
+  }
+
   if (runs.length === 0 && repos.length > 0) {
     warnings.push({
       area: "ci",
@@ -713,7 +828,13 @@ function createUnavailableBillingSummary(year: number, month: number, message: s
   }
 }
 
-function toRepoSummary(repo: RawRepo, graph?: GraphRepoNode): RepoSummary {
+function toRepoSummary(
+  repo: RawRepo,
+  graph?: GraphRepoNode,
+  options: { useRestIssueFallback?: boolean } = {}
+): RepoSummary {
+  const useRestIssueFallback = options.useRestIssueFallback ?? true
+
   return {
     id: repo.id,
     name: repo.name,
@@ -732,7 +853,7 @@ function toRepoSummary(repo: RawRepo, graph?: GraphRepoNode): RepoSummary {
     defaultBranch: repo.default_branch ?? null,
     pushedAt: repo.pushed_at,
     updatedAt: repo.updated_at,
-    openIssues: graph?.issues?.totalCount ?? repo.open_issues_count,
+    openIssues: graph?.issues?.totalCount ?? (useRestIssueFallback ? repo.open_issues_count : null),
     openPullRequests: graph?.pullRequests?.totalCount ?? null,
     checkState: graph?.defaultBranchRef?.target?.statusCheckRollup?.state ?? null,
     latestCommit: null,
@@ -770,6 +891,7 @@ function toIssueSummary(item: RawSearchIssue, isPullRequest: boolean): IssueSumm
     author: item.user?.login ?? null,
     labels: (item.labels ?? []).map((label) => label.name).slice(0, 3),
     isPullRequest,
+    isDraft: Boolean(item.draft),
   }
 }
 
@@ -786,6 +908,7 @@ function toPullRequestSummary(repo: string, item: RawPullRequest): IssueSummary 
     author: item.user?.login ?? null,
     labels: [],
     isPullRequest: true,
+    isDraft: Boolean(item.draft),
   }
 }
 
@@ -816,7 +939,7 @@ async function ghJson<T>(
   if (options.paginate) args.push("--paginate")
   if (options.slurp) args.push("--slurp")
 
-  const stdout = await ghExecutor(args, endpoint)
+  const stdout = await currentExecutor()(args, endpoint)
   return JSON.parse(stdout) as T
 }
 
@@ -826,7 +949,7 @@ async function ghGraphql<T>(query: string, fields: Record<string, string | undef
     if (value == null) continue
     args.push("-F", `${key}=${value}`)
   }
-  const stdout = await ghExecutor(args, "graphql")
+  const stdout = await currentExecutor()(args, "graphql")
   return JSON.parse(stdout) as T
 }
 
@@ -960,10 +1083,11 @@ function clamp(value: number, min: number, max: number): number {
 
 export function configureGithubDashboardForTests(executor: GhExecutor | null) {
   ghExecutor = executor ?? execGh
-  fullCache = null
-  quickCache = null
-  repoDetailsCache = createEmptyRepoDetailsCache()
-  repoDetailsCacheLoaded = Boolean(executor)
+  fullCaches.clear()
+  quickCaches.clear()
+  repoDetailsCaches.clear()
+  if (executor) repoDetailsCaches.set(LOCAL_CACHE_KEY, createEmptyRepoDetailsCache())
+  localRepoDetailsCacheLoaded = Boolean(executor)
   skipRepoDetailsCacheWrites = Boolean(executor)
   inFlightDashboards.clear()
 }

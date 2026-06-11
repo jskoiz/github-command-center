@@ -42,14 +42,15 @@ describe("RepoTable", () => {
     expect(getHeaderOrder(container).slice(0, 4)).toEqual(["repo", "openIssues", "openPullRequests", "lastCommit"])
   })
 
-  it("combines pull request details with CI status by default", () => {
+  it("shows CI status on the repo cell and pull request details by default", () => {
     const { container } = renderRepoTable()
 
     expect(getHeaderOrder(container)).toContain("lastPullRequest")
     expect(getHeaderOrder(container)).not.toContain("ci")
-    expect(screen.getByText("PR / CI")).toBeTruthy()
+    expect(screen.getByText("Last PR")).toBeTruthy()
     expect(screen.getByLabelText("passing")).toBeTruthy()
     expect(screen.getByText("Tighten table density")).toBeTruthy()
+    expect(screen.getByText("closed")).toBeTruthy()
   })
 })
 

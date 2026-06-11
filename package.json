@@ -1,15 +1,15 @@
 {
   "name": "github-command-center",
-  "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "check": "npm run lint && npm run typecheck && npm run test && npm run build",
     "clean": "rm -rf dist",
+    "dev": "vite --host 127.0.0.1",
     "lint": "eslint .",
     "preview": "vite preview --host 127.0.0.1",
+    "start": "node server/main.ts",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.app.json --noEmit --pretty false && tsc -p tsconfig.node.json --noEmit --pretty false"
   },
@@ -46,5 +46,10 @@
     "typescript-eslint": "^8.59.2",
     "vite": "^8.0.12",
     "vitest": "^4.1.8"
-  }
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "private": true
 }

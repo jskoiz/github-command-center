@@ -1,0 +1,369 @@
+import { randomBytes } from "node:crypto"
+import type { IncomingMessage, ServerResponse } from "node:http"
+import { extname, join, normalize } from "node:path"
+
+import {
+  openSession,
+  parseCookies,
+  sealSession,
+  serializeCookie,
+  type Session,
+} from "./session.ts"
+import {
+  RATE_LIMIT_MESSAGE,
+  type HostedRateLimiters,
+  type RateLimitResult,
+} from "./rate-limit.ts"
+
+export const OAUTH_SCOPES = "repo user"
+export const SESSION_COOKIE = "gcc_session"
+export const STATE_COOKIE = "gcc_oauth_state"
+export const SESSION_COOKIE_MAX_AGE = 30 * 24 * 60 * 60
+
+const revokedSessionIds = new Map<string, number>()
+
+const CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".txt": "text/plain; charset=utf-8",
+  ".map": "application/json",
+}
+
+type StaticFileStat = {
+  isDirectory(): boolean
+}
+
+type DashboardLoaderOptions = {
+  force?: boolean
+  quick?: boolean
+  scanLimit?: number
+  auth?: {
+    token: string
+    userKey: string
+  }
+}
+
+type HostedLogger = Pick<Console, "error" | "warn">
+
+export type HostedServerDependencies = {
+  baseUrl: string
+  clientId: string
+  clientSecret: string
+  distDir: string
+  sessionKey: Buffer
+  secureCookies: boolean
+  exchangeOAuthCode(options: {
+    clientId: string
+    clientSecret: string
+    code: string
+    redirectUri: string
+  }): Promise<string>
+  fetchViewerLogin(token: string): Promise<string>
+  revokeOAuthToken(options: {
+    clientId: string
+    clientSecret: string
+    token: string
+  }): Promise<void>
+  rateLimiters: HostedRateLimiters
+  loadDashboard(options: DashboardLoaderOptions): Promise<unknown>
+  readFile(path: string): Promise<Buffer>
+  stat(path: string): Promise<StaticFileStat>
+  logger: HostedLogger
+}
+
+export function revokeSessionId(id: string, expiresAt: number) {
+  pruneExpiredRevocations()
+  if (expiresAt <= Date.now()) return
+  revokedSessionIds.set(id, expiresAt)
+}
+
+export function isSessionIdRevoked(id: string): boolean {
+  pruneExpiredRevocations()
+  return revokedSessionIds.has(id)
+}
+
+export function createHostedRequestHandler(dependencies: HostedServerDependencies) {
+  const baseUrl = dependencies.baseUrl.replace(/\/$/, "")
+
+  return (req: IncomingMessage, res: ServerResponse) => {
+    void handleRequest(dependencies, baseUrl, req, res).catch((error) => {
+      dependencies.logger.error("Unhandled request error:", error)
+      if (!res.headersSent) {
+        sendJson(res, 500, { message: "Internal server error." })
+      } else {
+        res.end()
+      }
+    })
+  }
+}
+
+async function handleRequest(
+  dependencies: HostedServerDependencies,
+  baseUrl: string,
+  req: IncomingMessage,
+  res: ServerResponse
+) {
+  const url = new URL(req.url ?? "/", baseUrl)
+
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    sendJson(res, 405, { message: "Method not allowed." })
+    return
+  }
+
+  if (url.pathname === "/auth/login") return handleLogin(dependencies, baseUrl, req, res)
+  if (url.pathname === "/auth/callback") return handleCallback(dependencies, baseUrl, req, res, url)
+  if (url.pathname === "/auth/logout") return handleLogout(dependencies, req, res)
+  if (url.pathname === "/api/dashboard") return handleDashboard(dependencies, req, res, url)
+  if (url.pathname === "/healthz") {
+    sendJson(res, 200, { ok: true })
+    return
+  }
+
+  return serveStatic(dependencies, res, url.pathname)
+}
+
+function handleLogin(
+  dependencies: HostedServerDependencies,
+  baseUrl: string,
+  req: IncomingMessage,
+  res: ServerResponse
+) {
+  const limit = dependencies.rateLimiters.auth.check(`auth:${remoteAddressBucket(req)}`)
+  if (!limit.allowed) {
+    sendRateLimit(res, limit)
+    return
+  }
+
+  const state = randomBytes(16).toString("hex")
+  const authorize = new URL("https://github.com/login/oauth/authorize")
+  authorize.searchParams.set("client_id", dependencies.clientId)
+  authorize.searchParams.set("redirect_uri", `${baseUrl}/auth/callback`)
+  authorize.searchParams.set("scope", OAUTH_SCOPES)
+  authorize.searchParams.set("state", state)
+
+  res.statusCode = 302
+  res.setHeader(
+    "Set-Cookie",
+    serializeCookie(STATE_COOKIE, state, { maxAgeSeconds: 600, secure: dependencies.secureCookies })
+  )
+  res.setHeader("Location", authorize.toString())
+  res.end()
+}
+
+async function handleCallback(
+  dependencies: HostedServerDependencies,
+  baseUrl: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL
+) {
+  const limit = dependencies.rateLimiters.auth.check(`auth:${remoteAddressBucket(req)}`)
+  if (!limit.allowed) {
+    sendRateLimit(res, limit)
+    return
+  }
+
+  const code = url.searchParams.get("code")
+  const state = url.searchParams.get("state")
+  const cookies = parseCookies(req.headers.cookie)
+
+  if (!code || !state || !cookies[STATE_COOKIE] || cookies[STATE_COOKIE] !== state) {
+    sendJson(res, 400, { message: "OAuth state mismatch. Start again at /auth/login." })
+    return
+  }
+
+  try {
+    const token = await dependencies.exchangeOAuthCode({
+      clientId: dependencies.clientId,
+      clientSecret: dependencies.clientSecret,
+      code,
+      redirectUri: `${baseUrl}/auth/callback`,
+    })
+    const login = await dependencies.fetchViewerLogin(token)
+    const session: Session = { id: randomBytes(16).toString("hex"), token, login, issuedAt: Date.now() }
+
+    res.statusCode = 302
+    res.setHeader("Set-Cookie", [
+      serializeCookie(SESSION_COOKIE, sealSession(session, dependencies.sessionKey), {
+        maxAgeSeconds: SESSION_COOKIE_MAX_AGE,
+        secure: dependencies.secureCookies,
+      }),
+      serializeCookie(STATE_COOKIE, "", { maxAgeSeconds: 0, secure: dependencies.secureCookies }),
+    ])
+    res.setHeader("Location", "/")
+    res.end()
+  } catch (error) {
+    dependencies.logger.error("OAuth callback failed:", error)
+    sendJson(res, 502, { message: "GitHub sign-in failed. Try again at /auth/login." })
+  }
+}
+
+async function handleLogout(
+  dependencies: HostedServerDependencies,
+  req: IncomingMessage,
+  res: ServerResponse
+) {
+  const cookies = parseCookies(req.headers.cookie)
+  const session = cookies[SESSION_COOKIE] ? openSession(cookies[SESSION_COOKIE], dependencies.sessionKey) : null
+
+  if (session) {
+    revokeSessionId(session.id, session.issuedAt + SESSION_COOKIE_MAX_AGE * 1000)
+    try {
+      await dependencies.revokeOAuthToken({
+        clientId: dependencies.clientId,
+        clientSecret: dependencies.clientSecret,
+        token: session.token,
+      })
+    } catch (error) {
+      dependencies.logger.warn("GitHub OAuth token revocation failed:", error)
+    }
+  }
+
+  res.statusCode = 302
+  res.setHeader(
+    "Set-Cookie",
+    serializeCookie(SESSION_COOKIE, "", { maxAgeSeconds: 0, secure: dependencies.secureCookies })
+  )
+  res.setHeader("Location", "/")
+  res.end()
+}
+
+async function handleDashboard(
+  dependencies: HostedServerDependencies,
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL
+) {
+  const cookies = parseCookies(req.headers.cookie)
+  const session = cookies[SESSION_COOKIE] ? openSession(cookies[SESSION_COOKIE], dependencies.sessionKey) : null
+
+  if (!session) {
+    res.setHeader("x-gcc-auth", "oauth")
+    sendJson(res, 401, { message: "Sign in with GitHub to load the dashboard.", loginUrl: "/auth/login" })
+    return
+  }
+
+  if (isSessionIdRevoked(session.id)) {
+    sendExpiredSession(dependencies, res)
+    return
+  }
+
+  try {
+    const force = url.searchParams.get("refresh") === "1"
+    const quick = url.searchParams.get("quick") === "1"
+    const limit = dashboardRateLimiter(dependencies.rateLimiters, { force, quick }).check(
+      `${dashboardRateLimitPrefix({ force, quick })}:${session.login}`
+    )
+    if (!limit.allowed) {
+      sendRateLimit(res, limit, { authHeader: true })
+      return
+    }
+
+    const payload = await dependencies.loadDashboard({
+      force,
+      quick,
+      scanLimit: Number(url.searchParams.get("scanLimit") ?? 24),
+      auth: { token: session.token, userKey: session.login },
+    })
+    res.setHeader("x-gcc-auth", "oauth")
+    sendJson(res, 200, payload)
+  } catch (error) {
+    const status = (error as { status?: number }).status
+    if (status === 401) {
+      sendExpiredSession(dependencies, res)
+      return
+    }
+    const message = error instanceof Error ? error.message : "Dashboard request failed."
+    sendJson(res, 500, { message })
+  }
+}
+
+function remoteAddressBucket(req: IncomingMessage) {
+  return req.socket.remoteAddress?.trim() || "unknown"
+}
+
+function dashboardRateLimiter(
+  rateLimiters: HostedRateLimiters,
+  request: { force: boolean; quick: boolean }
+) {
+  if (request.force) return rateLimiters.refreshDashboard
+  if (request.quick) return rateLimiters.quickDashboard
+  return rateLimiters.fullDashboard
+}
+
+function dashboardRateLimitPrefix(request: { force: boolean; quick: boolean }) {
+  if (request.force) return "refresh"
+  if (request.quick) return "quick"
+  return "full"
+}
+
+function pruneExpiredRevocations() {
+  const now = Date.now()
+  for (const [id, expiresAt] of revokedSessionIds) {
+    if (expiresAt <= now) revokedSessionIds.delete(id)
+  }
+}
+
+function sendExpiredSession(dependencies: HostedServerDependencies, res: ServerResponse) {
+  res.setHeader(
+    "Set-Cookie",
+    serializeCookie(SESSION_COOKIE, "", { maxAgeSeconds: 0, secure: dependencies.secureCookies })
+  )
+  res.setHeader("x-gcc-auth", "oauth")
+  sendJson(res, 401, { message: "GitHub session expired. Sign in again.", loginUrl: "/auth/login" })
+}
+
+async function serveStatic(dependencies: HostedServerDependencies, res: ServerResponse, pathname: string) {
+  const requested = pathname === "/" ? "/index.html" : pathname
+  const safePath = normalize(requested).replace(/^(\.\.[/\\])+/, "")
+  let filePath = join(dependencies.distDir, safePath)
+  if (!filePath.startsWith(dependencies.distDir)) {
+    sendJson(res, 403, { message: "Forbidden." })
+    return
+  }
+
+  try {
+    const stats = await dependencies.stat(filePath)
+    if (stats.isDirectory()) filePath = join(filePath, "index.html")
+  } catch {
+    // SPA fallback: unknown paths render the app shell.
+    filePath = join(dependencies.distDir, "index.html")
+  }
+
+  try {
+    const body = await dependencies.readFile(filePath)
+    res.statusCode = 200
+    res.setHeader("Content-Type", CONTENT_TYPES[extname(filePath)] ?? "application/octet-stream")
+    if (filePath.includes("/assets/")) {
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable")
+    } else {
+      res.setHeader("Cache-Control", "no-cache")
+    }
+    res.end(body)
+  } catch {
+    sendJson(res, 404, { message: "Not found. Run `npm run build` before starting the server." })
+  }
+}
+
+function sendJson(res: ServerResponse, status: number, payload: unknown) {
+  res.statusCode = status
+  res.setHeader("Content-Type", "application/json; charset=utf-8")
+  res.end(JSON.stringify(payload))
+}
+
+function sendRateLimit(
+  res: ServerResponse,
+  limit: Extract<RateLimitResult, { allowed: false }>,
+  options: { authHeader?: boolean } = {}
+) {
+  if (options.authHeader) res.setHeader("x-gcc-auth", "oauth")
+  res.setHeader("Retry-After", String(limit.retryAfterSeconds))
+  sendJson(res, 429, { message: RATE_LIMIT_MESSAGE })
+}
