@@ -204,7 +204,7 @@ function RepoSidebar({
   onToggleRepoHidden: (id: number) => void
 }) {
   return (
-    <Card className="min-h-0 gap-0 rounded-lg py-0 shadow-sm shadow-foreground/[0.02] max-lg:max-h-72 lg:row-span-2 lg:h-full xl:row-span-1" size="sm">
+    <Card id="repos" role="region" aria-label="Repositories" className="min-h-0 gap-0 rounded-lg py-0 shadow-sm shadow-foreground/[0.02] max-lg:max-h-72 lg:row-span-2 lg:h-full xl:row-span-1" size="sm">
       <CardHeader className="min-h-9 items-center border-b px-3 py-1.5 [.border-b]:pb-1.5">
         <CardTitle className="flex items-center gap-2 text-xs leading-none font-semibold">
           Repos
@@ -359,12 +359,24 @@ function FeedCard({
 }) {
   return (
     <Card className="min-h-0 gap-0 rounded-lg py-0 shadow-sm shadow-foreground/[0.02] max-lg:max-h-96 lg:h-full" size="sm">
-      <CardHeader className="min-h-9 items-center border-b px-3 py-1.5 [.border-b]:pb-1.5">
-        <CardTitle className="flex min-w-0 items-center gap-1.5 text-xs leading-none font-semibold">
-          <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-          {title}
-          <Badge variant="outline" className="h-5 px-1.5 font-mono">{count}</Badge>
-          {selectedRepo ? (
+      <CardHeader className="min-h-9 gap-1 border-b px-3 py-1.5 [.border-b]:pb-1.5">
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <CardTitle className="flex min-w-0 items-center gap-1.5 text-xs leading-none font-semibold">
+            <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+            <span className="min-w-0 truncate">{title}</span>
+            <Badge variant="outline" className="h-5 px-1.5 font-mono">{count}</Badge>
+          </CardTitle>
+          <Button variant="link" size="xs" className="h-5 px-1 text-xs" asChild>
+            <a href={href} target="_blank" rel="noreferrer">
+              View all
+              <ExternalLinkIcon data-icon="inline-end" />
+            </a>
+          </Button>
+        </div>
+        {filter || selectedRepo ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            {filter}
+            {selectedRepo ? (
             <button
               type="button"
               onClick={onClearRepo}
@@ -374,17 +386,9 @@ function FeedCard({
               <span className="truncate">{shortRepoName(selectedRepo)}</span>
               <XIcon className="size-3 shrink-0" aria-hidden="true" />
             </button>
-          ) : null}
-        </CardTitle>
-        <CardAction className="flex items-center gap-1.5 self-center">
-          {filter}
-          <Button variant="link" size="xs" className="h-5 px-1 text-xs" asChild>
-            <a href={href} target="_blank" rel="noreferrer">
-              View all
-              <ExternalLinkIcon data-icon="inline-end" />
-            </a>
-          </Button>
-        </CardAction>
+            ) : null}
+          </div>
+        ) : null}
       </CardHeader>
       <CardContent className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 py-1.5 text-xs [scrollbar-gutter:stable]">
         {children}

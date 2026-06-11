@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { createTokenExecutor, PaginationLimitError, revokeOAuthToken } from "./github-client.ts"
+import { createPublicExecutor, createTokenExecutor, PaginationLimitError, revokeOAuthToken } from "./github-client.ts"
 
 function jsonResponse(body: unknown, options: { status?: number; headers?: Record<string, string> } = {}) {
   const headers = new Headers(options.headers)
@@ -195,6 +195,32 @@ describe("createTokenExecutor", () => {
     ], "graphql")).rejects.toMatchObject({
       status: 200,
       endpoint: "graphql",
+    })
+  })
+})
+
+describe("createPublicExecutor", () => {
+  it("omits Authorization by default for public REST requests", async () => {
+    const fetchMock = installFetchMock()
+    fetchMock.mockResolvedValueOnce(jsonResponse({ login: "jskoiz" }))
+
+    const executor = createPublicExecutor()
+    await executor(["api", "/users/jskoiz"], "/users/jskoiz")
+    const [, init] = getFetchCall(fetchMock)
+
+    expect((init?.headers as Record<string, string>).Authorization).toBeUndefined()
+  })
+
+  it("uses an optional server token for public REST requests", async () => {
+    const fetchMock = installFetchMock()
+    fetchMock.mockResolvedValueOnce(jsonResponse({ login: "jskoiz" }))
+
+    const executor = createPublicExecutor("ghp_public_rate_token")
+    await executor(["api", "/users/jskoiz"], "/users/jskoiz")
+    const [, init] = getFetchCall(fetchMock)
+
+    expect(init?.headers).toMatchObject({
+      Authorization: "Bearer ghp_public_rate_token",
     })
   })
 })

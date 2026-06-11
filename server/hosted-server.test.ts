@@ -27,6 +27,7 @@ import { deriveSessionKey, openSession, sealSession, type Session } from "./sess
 type OAuthExchangeOptions = Parameters<HostedServerDependencies["exchangeOAuthCode"]>[0]
 type OAuthRevocationOptions = Parameters<HostedServerDependencies["revokeOAuthToken"]>[0]
 type DashboardOptions = Parameters<HostedServerDependencies["loadDashboard"]>[0]
+type PublicDashboardOptions = Parameters<HostedServerDependencies["loadPublicDashboard"]>[1]
 type FixtureLogger = {
   error: Mock<Console["error"]>
   warn: Mock<Console["warn"]>
@@ -37,13 +38,17 @@ type FixtureCalls = {
   revocations: OAuthRevocationOptions[]
   viewerTokens: string[]
   dashboards: DashboardOptions[]
+  publicDashboards: Array<{ username: string; options: PublicDashboardOptions }>
   staticStats: string[]
   staticReads: string[]
 }
 
 type FixtureOptions = {
   distDir?: string
+  clientId?: string
+  clientSecret?: string
   loadDashboard?: HostedServerDependencies["loadDashboard"]
+  loadPublicDashboard?: HostedServerDependencies["loadPublicDashboard"]
   rateLimiters?: HostedRateLimiters
   revokeOAuthToken?: HostedServerDependencies["revokeOAuthToken"]
   readFile?: HostedServerDependencies["readFile"]
@@ -83,14 +88,15 @@ async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
     revocations: [],
     viewerTokens: [],
     dashboards: [],
+    publicDashboards: [],
     staticStats: [],
     staticReads: [],
   }
 
   const dependencies: HostedServerDependencies = {
     baseUrl: BASE_URL,
-    clientId: "client-id",
-    clientSecret: "client-secret",
+    clientId: options.clientId ?? "client-id",
+    clientSecret: options.clientSecret ?? "client-secret",
     distDir: options.distDir ?? DIST_DIR,
     sessionKey,
     secureCookies: options.secureCookies ?? false,
@@ -111,6 +117,10 @@ async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
     loadDashboard: options.loadDashboard ?? (async (dashboardOptions) => {
       calls.dashboards.push(dashboardOptions)
       return { ok: true }
+    }),
+    loadPublicDashboard: options.loadPublicDashboard ?? (async (username, dashboardOptions) => {
+      calls.publicDashboards.push({ username, options: dashboardOptions })
+      return { ok: true, username }
     }),
     readFile: async (path) => {
       calls.staticReads.push(path)
@@ -359,6 +369,24 @@ describe("hosted request handler", () => {
     })
   })
 
+  it("keeps auth routes unavailable when OAuth is not configured", async () => {
+    await withFixture(async (fixture) => {
+      const login = await fixture.request("/auth/login")
+      const callback = await fixture.request("/auth/callback?code=code-123&state=known", {
+        headers: { Cookie: `${STATE_COOKIE}=known` },
+      })
+
+      expect(login.status).toBe(503)
+      expect(callback.status).toBe(503)
+      expect(JSON.parse(login.body)).toEqual({
+        message: "GitHub OAuth is not configured. Open /:username to view a public profile dashboard.",
+      })
+      expect(JSON.parse(callback.body)).toEqual(JSON.parse(login.body))
+      expect(header(login, "location")).toBeUndefined()
+      expect(fixture.calls.exchanges).toHaveLength(0)
+    }, { clientId: "", clientSecret: "" })
+  })
+
   it("rate-limits repeated login requests by remote address", async () => {
     const rateLimiters = testRateLimiters({ auth: { limit: 1, windowMs: 60_000, now: () => 0 } })
 
@@ -387,7 +415,7 @@ describe("hosted request handler", () => {
     })
   })
 
-  it("exchanges a valid callback, sets the session, clears state, and redirects home", async () => {
+  it("exchanges a valid callback, sets the session, clears state, and redirects to the dashboard", async () => {
     await withFixture(async (fixture) => {
       const response = await fixture.request("/auth/callback?code=code-123&state=known", {
         headers: { Cookie: `${STATE_COOKIE}=known` },
@@ -396,7 +424,7 @@ describe("hosted request handler", () => {
       const stateClearCookie = response.setCookies.find((cookie) => cookie.startsWith(`${STATE_COOKIE}=`))
 
       expect(response.status).toBe(302)
-      expect(header(response, "location")).toBe("/")
+      expect(header(response, "location")).toBe("/dashboard")
       expect(fixture.calls.exchanges).toEqual([{
         clientId: "client-id",
         clientSecret: "client-secret",
@@ -502,6 +530,66 @@ describe("hosted request handler", () => {
         loginUrl: "/auth/login",
       })
     })
+  })
+
+  it("reports the root dashboard as public-only when OAuth is not configured", async () => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/api/dashboard")
+
+      expect(response.status).toBe(401)
+      expect(header(response, "x-gcc-auth")).toBe("oauth")
+      expect(JSON.parse(response.body)).toEqual({
+        message: "GitHub OAuth is not configured. Open /:username to view a public profile dashboard.",
+      })
+    }, { clientId: "", clientSecret: "" })
+  })
+
+  it("loads public username dashboards without an OAuth session", async () => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/api/dashboard/jskoiz?quick=1&scanLimit=12")
+
+      expect(response.status).toBe(200)
+      expect(header(response, "x-gcc-auth")).toBe("public")
+      expect(JSON.parse(response.body)).toEqual({ ok: true, username: "jskoiz" })
+      expect(fixture.calls.publicDashboards).toEqual([{
+        username: "jskoiz",
+        options: {
+          force: false,
+          quick: true,
+          scanLimit: 12,
+        },
+      }])
+      expect(fixture.calls.dashboards).toHaveLength(0)
+    })
+  })
+
+  it("loads public username dashboards when OAuth is not configured", async () => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/api/dashboard/jskoiz")
+
+      expect(response.status).toBe(200)
+      expect(header(response, "x-gcc-auth")).toBe("public")
+      expect(JSON.parse(response.body)).toEqual({ ok: true, username: "jskoiz" })
+      expect(fixture.calls.publicDashboards).toHaveLength(1)
+      expect(fixture.calls.dashboards).toHaveLength(0)
+    }, { clientId: "", clientSecret: "" })
+  })
+
+  it("rate-limits public username dashboard requests by profile and remote address", async () => {
+    const rateLimiters = testRateLimiters({
+      fullDashboard: { limit: 1, windowMs: 60_000, now: () => 0 },
+    })
+
+    await withFixture(async (fixture) => {
+      const allowed = await fixture.request("/api/dashboard/jskoiz")
+      const blocked = await fixture.request("/api/dashboard/jskoiz")
+
+      expect(allowed.status).toBe(200)
+      expect(blocked.status).toBe(429)
+      expect(header(blocked, "retry-after")).toBe("60")
+      expect(JSON.parse(blocked.body)).toEqual({ message: RATE_LIMIT_MESSAGE })
+      expect(fixture.calls.publicDashboards).toHaveLength(1)
+    }, { rateLimiters })
   })
 
   it("does not count unauthenticated dashboard requests against user buckets", async () => {

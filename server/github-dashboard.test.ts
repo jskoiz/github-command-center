@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { configureGithubDashboardForTests, getGithubDashboard } from "./github-dashboard"
+import { configureGithubDashboardForTests, getGithubDashboard, getPublicGithubDashboard } from "./github-dashboard"
 import { PaginationLimitError } from "./github-client"
 
 type GhCall = {
@@ -199,6 +199,16 @@ function createRawWorkflowRun(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      ...headers,
+    },
+  })
+}
+
 function repoNameWithOwner(repo: unknown) {
   return typeof repo === "object" && repo !== null && "full_name" in repo
     ? String(repo.full_name)
@@ -207,6 +217,7 @@ function repoNameWithOwner(repo: unknown) {
 
 afterEach(() => {
   configureGithubDashboardForTests(null)
+  vi.unstubAllGlobals()
 })
 
 describe("getGithubDashboard request coalescing", () => {
@@ -288,6 +299,45 @@ describe("getGithubDashboard request coalescing", () => {
     expect(payload.repos[0].latestPullRequest).toBeNull()
     expect(calls.some((call) => call.endpoint.includes("/commits?per_page=1"))).toBe(false)
     expect(calls.some((call) => call.endpoint.includes("/pulls?state=all"))).toBe(false)
+  })
+})
+
+describe("getPublicGithubDashboard", () => {
+  it("loads public profile quick data without an OAuth Authorization header", async () => {
+    const fetchMock = vi.fn(async (...[input]: [string | URL | Request, RequestInit?]) => {
+      const url = input.toString()
+      if (url.endsWith("/users/jskoiz")) {
+        return jsonResponse({
+          login: "jskoiz",
+          name: "saburo",
+          avatar_url: "https://example.com/avatar.png",
+          html_url: "https://github.com/jskoiz",
+        })
+      }
+      if (url.endsWith("/users/jskoiz/repos?per_page=8&sort=pushed&type=owner")) {
+        return jsonResponse([createRawRepo({
+          visibility: "public",
+          private: false,
+        })])
+      }
+      throw new Error(`Unhandled fetch ${url}`)
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    const payload = await getPublicGithubDashboard("jskoiz", { force: true, quick: true, scanLimit: 8 })
+
+    expect(payload.viewer.login).toBe("jskoiz")
+    expect(payload.repos).toHaveLength(1)
+    expect(payload.repos[0]).toMatchObject({
+      fullName: "jskoiz/active-repo",
+      visibility: "public",
+      isPrivate: false,
+    })
+    expect(payload.billing.available).toBe(false)
+    expect(fetchMock.mock.calls.every(([, init]) => {
+      const headers = (init as RequestInit | undefined)?.headers as Record<string, string> | undefined
+      return headers?.Authorization === undefined
+    })).toBe(true)
   })
 })
 

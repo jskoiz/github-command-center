@@ -5,10 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import App from "./App"
 import type { DashboardPayload, RepoSummary, WorkflowRunSummary } from "./types/github"
 
-const CACHE_KEY = "github-command-center:dashboard-cache:v3"
+const CACHE_KEY = "github-command-center:dashboard-cache:v4:session"
+const PUBLIC_CACHE_KEY = "github-command-center:dashboard-cache:v4:public:jskoiz"
 const HIDDEN_REPOS_KEY = "github-command-center:hidden-repos"
 
 beforeEach(() => {
+  window.history.replaceState(null, "", "/")
   window.localStorage.clear()
   window.sessionStorage.clear()
 })
@@ -19,22 +21,66 @@ afterEach(() => {
 })
 
 describe("App dashboard cache auth", () => {
+  it("renders the minimal root landing without loading a dashboard", async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal("fetch", fetchMock)
+
+    render(<App />)
+
+    expect(screen.getByRole("heading", { name: "An actual usable GitHub homepage." })).toBeTruthy()
+    expect(screen.getByRole("textbox", { name: "GitHub username" })).toBeTruthy()
+    expect((screen.getByRole("button", { name: "Open public view" }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByRole("link", { name: "View demo" }).getAttribute("href")).toBe("/demo")
+    expect(screen.getByRole("link", { name: /Sign in for full view/i }).getAttribute("href")).toBe("/auth/login")
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("turns a valid username into a public profile form action", async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal("fetch", vi.fn())
+
+    render(<App />)
+
+    const username = screen.getByRole("textbox", { name: "GitHub username" })
+    await user.type(username, "jskoiz")
+
+    expect((screen.getByRole("button", { name: "Open public view" }) as HTMLButtonElement).disabled).toBe(false)
+    expect(username.closest("form")?.getAttribute("action")).toBe("/jskoiz")
+  })
+
+  it("renders the demo dashboard from mock data without API requests", async () => {
+    window.history.replaceState(null, "", "/demo")
+    const fetchMock = vi.fn()
+    vi.stubGlobal("fetch", fetchMock)
+
+    render(<App />)
+
+    expect(await screen.findByText("okgithub")).toBeTruthy()
+    expect(screen.getByRole("region", { name: "Repositories" }).querySelector('button[title="okgithub/command-center"]')).toBeTruthy()
+    expect(screen.getByText("Make public profile pages the default share target")).toBeTruthy()
+    expect(screen.getByText("Add demo route and homepage link")).toBeTruthy()
+    expect(screen.getByText("GitHub Actions Billing")).toBeTruthy()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it("does not render a fresh cache when the current session is unauthorized", async () => {
+    window.history.replaceState(null, "", "/dashboard")
     writeCache(createPayload({
       viewer: createViewer("old-user"),
       repos: [createRepo("old-user/private-repo")],
     }))
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ message: "Sign in" }, 401, true)))
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ message: "Sign in" }, 401, "oauth")))
 
     render(<App />)
 
     expect(screen.queryByText("private-repo")).toBeNull()
-    expect(await screen.findByText("Sign in with GitHub")).toBeTruthy()
+    expect(await screen.findByText("Sign in for full view")).toBeTruthy()
     expect(screen.queryByText("private-repo")).toBeNull()
     expect(window.sessionStorage.getItem(CACHE_KEY)).toBeNull()
   })
 
   it("uses a fresh cache only after the quick auth check matches the cached viewer", async () => {
+    window.history.replaceState(null, "", "/dashboard")
     writeCache(createPayload({
       viewer: createViewer("jskoiz"),
       repos: [createRepo("jskoiz/cached-repo")],
@@ -43,7 +89,7 @@ describe("App dashboard cache auth", () => {
       detailLevel: "quick",
       viewer: createViewer("jskoiz"),
       repos: [],
-    }), 200, true))
+    }), 200, "oauth"))
     vi.stubGlobal("fetch", fetchMock)
 
     render(<App />)
@@ -54,6 +100,7 @@ describe("App dashboard cache auth", () => {
   })
 
   it("replaces a fresh cache when the quick auth check returns another viewer", async () => {
+    window.history.replaceState(null, "", "/dashboard")
     writeCache(createPayload({
       viewer: createViewer("old-user"),
       repos: [createRepo("old-user/private-repo")],
@@ -63,11 +110,11 @@ describe("App dashboard cache auth", () => {
         detailLevel: "quick",
         viewer: createViewer("new-user"),
         repos: [createRepo("new-user/quick-repo")],
-      }), 200, true))
+      }), 200, "oauth"))
       .mockResolvedValueOnce(jsonResponse(createPayload({
         viewer: createViewer("new-user"),
         repos: [createRepo("new-user/full-repo")],
-      }), 200, true))
+      }), 200, "oauth"))
     vi.stubGlobal("fetch", fetchMock)
 
     render(<App />)
@@ -76,6 +123,26 @@ describe("App dashboard cache auth", () => {
     expect(await screen.findByText("full-repo")).toBeTruthy()
     expect(screen.queryByText("private-repo")).toBeNull()
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it("loads username paths through the public dashboard API and cache", async () => {
+    window.history.replaceState(null, "", "/jskoiz")
+    const payload = createPayload({
+      viewer: createViewer("jskoiz"),
+      repos: [createRepo("jskoiz/public-repo", { visibility: "public", isPrivate: false })],
+    })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ...payload, detailLevel: "quick", repos: [] }, 200, "public"))
+      .mockResolvedValueOnce(jsonResponse(payload, 200, "public"))
+    vi.stubGlobal("fetch", fetchMock)
+
+    render(<App />)
+
+    expect(await findRepoButton("public-repo")).toBeTruthy()
+    expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/jskoiz?quick=1", expect.any(Object))
+    expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/jskoiz", expect.any(Object))
+    expect(window.sessionStorage.getItem(PUBLIC_CACHE_KEY)).toBeTruthy()
+    expect(window.sessionStorage.getItem(CACHE_KEY)).toBeNull()
   })
 })
 
@@ -96,17 +163,17 @@ describe("App attention strip actions", () => {
 
     render(<App />)
 
-    expect(await screen.findByRole("link", { name: "active-repo" })).toBeTruthy()
-    expect(table().queryByRole("link", { name: "inactive-pr-repo" })).toBeNull()
+    expect(await findRepoButton("active-repo")).toBeTruthy()
+    expect(queryRepoButton("inactive-pr-repo")).toBeNull()
     const search = screen.getByRole("textbox", { name: "Search repositories" }) as HTMLInputElement
     await user.type(search, "active-repo")
 
     await user.click(screen.getByRole("button", { name: /3\s*open PRs.*1 repo/i }))
 
     expect(search.value).toBe("")
-    expect(await table().findByRole("link", { name: "inactive-pr-repo" })).toBeTruthy()
-    expect(table().queryByRole("link", { name: "hidden-pr-repo" })).toBeNull()
-    expect(repoLinkNames()).toEqual(["inactive-pr-repo", "active-repo"])
+    expect(await findRepoButton("inactive-pr-repo")).toBeTruthy()
+    expect(queryRepoButton("hidden-pr-repo")).toBeNull()
+    expect(repoNames()).toEqual(["inactive-pr-repo", "active-repo"])
   })
 
   it("reveals non-hidden inactive repos with open issues and clears unrelated filters", async () => {
@@ -125,17 +192,17 @@ describe("App attention strip actions", () => {
 
     render(<App />)
 
-    expect(await screen.findByRole("link", { name: "active-repo" })).toBeTruthy()
-    expect(table().queryByRole("link", { name: "inactive-issue-repo" })).toBeNull()
+    expect(await findRepoButton("active-repo")).toBeTruthy()
+    expect(queryRepoButton("inactive-issue-repo")).toBeNull()
     const search = screen.getByRole("textbox", { name: "Search repositories" }) as HTMLInputElement
     await user.type(search, "active-repo")
 
     await user.click(screen.getByRole("button", { name: /4\s*open issues.*1 repo/i }))
 
     expect(search.value).toBe("")
-    expect(await table().findByRole("link", { name: "inactive-issue-repo" })).toBeTruthy()
-    expect(table().queryByRole("link", { name: "hidden-issue-repo" })).toBeNull()
-    expect(repoLinkNames()).toEqual(["inactive-issue-repo", "active-repo"])
+    expect(await findRepoButton("inactive-issue-repo")).toBeTruthy()
+    expect(queryRepoButton("hidden-issue-repo")).toBeNull()
+    expect(repoNames()).toEqual(["inactive-issue-repo", "active-repo"])
   })
 
   it("keeps the failing workflow action scoped to failures after resetting hidden and active filters", async () => {
@@ -161,17 +228,17 @@ describe("App attention strip actions", () => {
 
     render(<App />)
 
-    expect(await screen.findByRole("link", { name: "active-repo" })).toBeTruthy()
-    expect(table().queryByRole("link", { name: "inactive-failing-repo" })).toBeNull()
+    expect(await findRepoButton("active-repo")).toBeTruthy()
+    expect(queryRepoButton("inactive-failing-repo")).toBeNull()
     const search = screen.getByRole("textbox", { name: "Search repositories" }) as HTMLInputElement
     await user.type(search, "active-repo")
 
     await user.click(screen.getByRole("button", { name: /1\s*failing workflow.*1 repo/i }))
 
     expect(search.value).toBe("")
-    expect(await table().findByRole("link", { name: "inactive-failing-repo" })).toBeTruthy()
-    expect(table().queryByRole("link", { name: "active-repo" })).toBeNull()
-    expect(table().queryByRole("link", { name: "hidden-failing-repo" })).toBeNull()
+    expect(await findRepoButton("inactive-failing-repo")).toBeTruthy()
+    expect(queryRepoButton("active-repo")).toBeNull()
+    expect(queryRepoButton("hidden-failing-repo")).toBeNull()
   })
 
   it("renders unknown PR and issue totals as unavailable instead of zero", async () => {
@@ -184,7 +251,7 @@ describe("App attention strip actions", () => {
 
     render(<App />)
 
-    expect(await screen.findByRole("link", { name: "unknown-count-repo" })).toBeTruthy()
+    expect(await findRepoButton("unknown-count-repo")).toBeTruthy()
     expect(screen.getAllByText("n/a")).toHaveLength(2)
     expect(screen.getByText("open PRs · 1 unknown")).toBeTruthy()
     expect(screen.getByText("open issues · 1 unknown")).toBeTruthy()
@@ -200,18 +267,19 @@ function writeCache(payload: DashboardPayload) {
   }))
 }
 
-function jsonResponse(payload: unknown, status = 200, oauth = false) {
+function jsonResponse(payload: unknown, status = 200, auth: "oauth" | "public" | false = false) {
   return new Response(JSON.stringify(payload), {
     status,
     headers: {
       "Content-Type": "application/json",
-      ...(oauth ? { "x-gcc-auth": "oauth" } : {}),
+      ...(auth ? { "x-gcc-auth": auth } : {}),
     },
   })
 }
 
 function mockDashboard(payload: DashboardPayload) {
-  vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(payload, 200, true)))
+  window.history.replaceState(null, "", "/dashboard")
+  vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(payload, 200, "oauth")))
 }
 
 function createViewer(login: string) {
@@ -305,12 +373,27 @@ function hideRepos(...repos: RepoSummary[]) {
   window.localStorage.setItem(HIDDEN_REPOS_KEY, JSON.stringify(repos.map((repo) => repo.id)))
 }
 
-function table() {
-  return within(screen.getByRole("table"))
+function repoSidebar() {
+  return screen.getByRole("region", { name: "Repositories" })
 }
 
-function repoLinkNames() {
-  return table().getAllByRole("link").map((link) => link.textContent)
+function findRepoButton(name: string) {
+  return waitFor(() => {
+    const button = queryRepoButton(name)
+    expect(button).not.toBeNull()
+    return button
+  })
+}
+
+function queryRepoButton(name: string) {
+  return repoSidebar().querySelector(`button[title="jskoiz/${name}"]`)
+}
+
+function repoNames() {
+  return within(repoSidebar())
+    .getAllByRole("button")
+    .filter((button) => button.getAttribute("title")?.startsWith("jskoiz/"))
+    .map((button) => button.getAttribute("title")?.split("/")[1])
 }
 
 function daysAgo(days: number) {

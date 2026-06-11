@@ -1,14 +1,12 @@
 # GitHub Command Center
 
-A focused GitHub homepage: repositories, recent commits, PRs, issues, CI
-status, workflow failures, and GitHub Actions billing in one dense view.
+A focused GitHub homepage: PRs, issues, commits, CI status, workflow failures,
+and GitHub Actions billing in one dense activity view, with repositories kept
+as a slim sidebar for scoping the activity columns.
 
-Two views, toggled from the header:
-
-- **Table view** — a customizable repo table (sortable, reorderable, resizable
-  columns) with an attention strip and activity feeds.
-- **Focus view** — a slim repo sidebar that scopes full-height PR / issue /
-  commit columns to the selected repo, with per-column state filters.
+The root page is a minimal entrypoint: enter a GitHub username to open a public
+dashboard at `/username` with no login, open `/demo` for a mock-data tour, or
+sign in to open the full dashboard at `/dashboard`.
 
 Repos you don't care about can be hidden, noisy CI failures dismissed, and
 everything persists in the browser.
@@ -18,7 +16,8 @@ It runs in two modes:
 | Mode | Auth | Best for |
 | --- | --- | --- |
 | **Local** (`npm run dev`) | Your authenticated GitHub CLI (`gh`) | Personal use on your machine |
-| **Hosted** (`npm start`) | GitHub OAuth sign-in | Sharing a deployment with others |
+| **Hosted public** (`npm start`) | None for `/username` routes | Public profile dashboards like `/jskoiz` |
+| **Hosted OAuth** (`npm start`) | GitHub OAuth sign-in | `/dashboard` with private repo metadata, Actions billing, and signed-in data |
 
 ## Local mode
 
@@ -32,30 +31,44 @@ npm install
 npm run dev
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173). If `gh` is not on PATH,
-set `GH_BIN` (see [.env.example](./.env.example)). The local API only answers
-requests from localhost.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173) for the landing page,
+[http://127.0.0.1:5173/demo](http://127.0.0.1:5173/demo) for the mock-data
+demo, or [http://127.0.0.1:5173/dashboard](http://127.0.0.1:5173/dashboard)
+for the full local dashboard. If `gh` is not on PATH, set `GH_BIN` (see
+[.env.example](./.env.example)). The local API only answers requests from
+localhost.
 
 ## Hosted mode
 
-The standalone server (`server/main.ts`) serves the built app and signs users
-in with GitHub OAuth. Each user sees their own dashboard; tokens live in an
+The standalone server (`server/main.ts`) serves the built app. Public profile
+routes such as `/jskoiz` require no login and use public GitHub REST data.
+OAuth is optional and enables the signed-in `/dashboard` view, private repo
+metadata, GraphQL-only rollups, and Actions billing. Signed-in tokens live in an
 encrypted httpOnly cookie, never on disk.
 
-1. Create a **GitHub OAuth App** at <https://github.com/settings/developers>:
+Public profile routes can run anonymously, but GitHub's anonymous REST bucket is
+small. Set `GITHUB_PUBLIC_TOKEN` on the server to raise that limit without
+requiring visitors to log in.
+
+1. Configure the public deployment URL:
+
+   ```sh
+   BASE_URL=https://gcc.example.com
+   PORT=3000
+   ```
+
+2. Optional: create a **GitHub OAuth App** at <https://github.com/settings/developers>:
    - Homepage URL: your deployment URL (e.g. `https://gcc.example.com`)
    - Authorization callback URL: `https://gcc.example.com/auth/callback`
-2. Configure the environment (see [.env.example](./.env.example)):
+3. Optional: add OAuth environment variables (see [.env.example](./.env.example)):
 
    ```sh
    GITHUB_CLIENT_ID=...
    GITHUB_CLIENT_SECRET=...
    SESSION_SECRET=$(openssl rand -hex 32)
-   BASE_URL=https://gcc.example.com
-   PORT=3000
    ```
 
-3. Build and start:
+4. Build and start:
 
    ```sh
    npm ci
@@ -64,8 +77,8 @@ encrypted httpOnly cookie, never on disk.
    ```
 
 The OAuth flow requests the `repo` and `user` scopes (private repo metadata,
-workflow runs, and Actions billing). Run it behind HTTPS — cookies are marked
-`Secure` automatically when `BASE_URL` starts with `https://`.
+workflow runs, and Actions billing). Run OAuth deployments behind HTTPS;
+cookies are marked `Secure` automatically when `BASE_URL` starts with `https://`.
 
 Logout clears the local session, records the session id as revoked for the
 remaining cookie lifetime, and attempts to revoke the GitHub OAuth token.
@@ -79,16 +92,16 @@ limit repeated sign-in attempts and expensive dashboard fanout.
 ```sh
 docker build -t github-command-center .
 docker run -p 3000:3000 \
-  -e GITHUB_CLIENT_ID=... \
-  -e GITHUB_CLIENT_SECRET=... \
-  -e SESSION_SECRET=... \
   -e BASE_URL=https://gcc.example.com \
   github-command-center
 ```
 
+Add `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, and `SESSION_SECRET` to the
+container only when enabling OAuth sign-in.
+
 Works as-is on any host that runs a container or a Node process (Fly.io,
-Railway, Render, a VPS). Point `BASE_URL` and the OAuth callback at the public
-URL.
+Railway, Render, a VPS). Point `BASE_URL` at the public URL, and point the OAuth
+callback there if OAuth is enabled.
 
 ## Verify
 
@@ -116,11 +129,11 @@ preview command can still fetch live GitHub data.
 
 ## Data and caching
 
-- Local mode calls `gh api`; hosted mode calls the GitHub REST/GraphQL APIs
-  directly with the signed-in user's OAuth token. Both share the same
-  dashboard pipeline (`server/github-dashboard.ts`), with caches keyed per
-  user in hosted mode.
-- The server keeps a short in-memory cache (5 min full / 1 min quick) per user.
+- Local mode calls `gh api`; hosted OAuth mode calls the GitHub REST/GraphQL
+  APIs directly with the signed-in user's OAuth token; hosted public mode calls
+  public GitHub REST APIs anonymously or with `GITHUB_PUBLIC_TOKEN` when set.
+- The server keeps a short in-memory cache (5 min full / 1 min quick) per user
+  or public profile.
 - Cold starts first request a bounded quick payload, then load full details in
   the background.
 - Workflow-run scans default to the 24 most recently pushed repositories. The
@@ -129,8 +142,8 @@ preview command can still fetch live GitHub data.
   refreshed at most once per day for repos active in the last week. Local mode
   persists them to `.cache/github-command-center/repo-details.json`; hosted
   mode keeps them in memory.
-- The browser stores the latest full dashboard payload in session-scoped
-  storage, considered fresh for 10 minutes.
+- The browser stores the latest full dashboard payload in source-scoped storage,
+  considered fresh for 10 minutes.
 
 ## License
 

@@ -10,6 +10,16 @@ export default defineConfig({
     },
   },
   test: {
+    include: [
+      "src/**/*.{test,spec}.{ts,tsx}",
+      "server/**/*.{test,spec}.ts",
+    ],
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/.{idea,git,cache,output,temp}/**",
+      "**/.claude/**",
+    ],
     environment: "jsdom",
     setupFiles: "./src/test/setup.ts",
     environmentOptions: {

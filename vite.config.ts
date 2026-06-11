@@ -2,7 +2,7 @@ import { defineConfig, type Plugin, type PreviewServer, type ViteDevServer } fro
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import path from "node:path"
-import { getGithubDashboard } from "./server/github-dashboard"
+import { getGithubDashboard, getPublicGithubDashboard } from "./server/github-dashboard"
 import { isLocalDashboardRequest, LOCAL_DASHBOARD_ONLY_MESSAGE } from "./server/local-access"
 
 function installGithubDashboardApi(server: ViteDevServer | PreviewServer) {
@@ -21,13 +21,18 @@ function installGithubDashboardApi(server: ViteDevServer | PreviewServer) {
 
     try {
       const url = new URL(req.url ?? "/", "http://localhost")
-      const payload = await getGithubDashboard({
+      const publicUsername = publicDashboardUsernameFromMountedPath(url.pathname)
+      const options = {
         force: url.searchParams.get("refresh") === "1",
         quick: url.searchParams.get("quick") === "1",
         scanLimit: Number(url.searchParams.get("scanLimit") ?? 24),
-      })
+      }
+      const payload = publicUsername
+        ? await getPublicGithubDashboard(publicUsername, options)
+        : await getGithubDashboard(options)
 
       res.statusCode = 200
+      if (publicUsername) res.setHeader("x-gcc-auth", "public")
       res.setHeader("Content-Type", "application/json; charset=utf-8")
       res.end(JSON.stringify(payload))
     } catch (error) {
@@ -37,6 +42,11 @@ function installGithubDashboardApi(server: ViteDevServer | PreviewServer) {
       res.end(JSON.stringify({ message }))
     }
   })
+}
+
+function publicDashboardUsernameFromMountedPath(pathname: string): string | null {
+  const match = pathname.match(/^\/([^/?#]+)$/)
+  return match ? decodeURIComponent(match[1]) : null
 }
 
 function githubDashboardApi(): Plugin {

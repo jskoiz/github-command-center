@@ -3,7 +3,7 @@ import { execFile } from "node:child_process"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
-import { createTokenExecutor, isPaginationLimitError, type GhExecutor } from "./github-client.ts"
+import { createPublicExecutor, createTokenExecutor, isPaginationLimitError, type GhExecutor } from "./github-client.ts"
 import type {
   BillingRepoSummary,
   BillingSkuSummary,
@@ -48,6 +48,7 @@ let skipRepoDetailsCacheWrites = false
 type AuthContext = {
   executor: GhExecutor
   cacheKey: string
+  publicLogin?: string
 }
 
 const authContext = new AsyncLocalStorage<AuthContext>()
@@ -58,6 +59,10 @@ function currentExecutor(): GhExecutor {
 
 function currentCacheKey(): string {
   return authContext.getStore()?.cacheKey ?? LOCAL_CACHE_KEY
+}
+
+function currentPublicLogin(): string | undefined {
+  return authContext.getStore()?.publicLogin
 }
 
 function boundedMapSet<T>(map: Map<string, T>, key: string, value: T) {
@@ -199,6 +204,8 @@ export type DashboardAuth = {
   userKey: string
 }
 
+const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
+
 export async function getGithubDashboard(options: {
   force?: boolean
   quick?: boolean
@@ -213,6 +220,37 @@ export async function getGithubDashboard(options: {
     return authContext.run(context, () => getGithubDashboardInner(options))
   }
   return getGithubDashboardInner(options)
+}
+
+export async function getPublicGithubDashboard(
+  username: string,
+  options: {
+    force?: boolean
+    quick?: boolean
+    scanLimit?: number
+  } = {}
+): Promise<DashboardPayload> {
+  const login = normalizeGithubLogin(username)
+  const context: AuthContext = {
+    executor: createPublicExecutor(publicGithubToken()),
+    cacheKey: `public:${login.toLowerCase()}`,
+    publicLogin: login,
+  }
+  return authContext.run(context, () => getGithubDashboardInner(options))
+}
+
+function publicGithubToken(): string | null {
+  return process.env.GITHUB_PUBLIC_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN || null
+}
+
+function normalizeGithubLogin(username: string): string {
+  const login = username.trim()
+  if (!GITHUB_LOGIN_PATTERN.test(login)) {
+    const error = new Error("Invalid GitHub username.") as Error & { status: number }
+    error.status = 400
+    throw error
+  }
+  return login
 }
 
 async function getGithubDashboardInner(options: {
@@ -367,12 +405,13 @@ async function getQuickDashboard(scanLimit: number): Promise<DashboardPayload> {
 }
 
 async function getViewer(): Promise<Viewer> {
+  const publicLogin = currentPublicLogin()
   const raw = await ghJson<{
     login: string
     name: string | null
     avatar_url: string
     html_url: string
-  }>("user")
+  }>(publicLogin ? `/users/${encodeURIComponent(publicLogin)}` : "user")
 
   return {
     login: raw.login,
@@ -388,7 +427,10 @@ async function getRepos(
 ): Promise<RawRepo[]> {
   const paginate = options.paginate ?? true
   const perPage = clamp(options.perPage ?? 100, 1, 100)
-  const endpoint = `/user/repos?per_page=${perPage}&sort=pushed&affiliation=owner,collaborator,organization_member`
+  const publicLogin = currentPublicLogin()
+  const endpoint = publicLogin
+    ? `/users/${encodeURIComponent(publicLogin)}/repos?per_page=${perPage}&sort=pushed&type=owner`
+    : `/user/repos?per_page=${perPage}&sort=pushed&affiliation=owner,collaborator,organization_member`
 
   try {
     if (!paginate) {
@@ -415,6 +457,14 @@ async function getRepoGraphData(
   repoCount: number,
   warnings: DashboardWarning[]
 ): Promise<Map<string, GraphRepoNode>> {
+  if (currentPublicLogin()) {
+    warnings.push({
+      area: "public mode",
+      message: "Open PR counts and default-branch check rollups require sign-in; public profile data is limited to public GitHub REST responses.",
+    })
+    return new Map()
+  }
+
   const query = `query($login:String!,$first:Int!,$after:String){
     user(login:$login){
       repositories(first:$first, after:$after, orderBy:{field:PUSHED_AT,direction:DESC}, affiliations:[OWNER,COLLABORATOR,ORGANIZATION_MEMBER]) {
@@ -706,6 +756,14 @@ async function getBilling(login: string, warnings: DashboardWarning[]): Promise<
   const now = new Date()
   const year = now.getFullYear()
   const month = now.getMonth() + 1
+
+  if (currentPublicLogin()) {
+    return createUnavailableBillingSummary(
+      year,
+      month,
+      "Billing is not available in public profile mode."
+    )
+  }
 
   try {
     const raw = await ghJson<{ usageItems?: BillingUsageItem[] }>(

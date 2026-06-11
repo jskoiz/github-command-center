@@ -4,12 +4,11 @@ import type { DashboardPayload } from "@/types/github"
 import {
   clearDashboardCache,
   readDashboardCacheFromStorage,
-  removeLegacyDashboardCache,
   writeDashboardCacheToStorage,
 } from "./dashboard-cache"
 
-const CACHE_KEY = "github-command-center:dashboard-cache:v3"
-const LEGACY_CACHE_KEY = "github-command-center:dashboard-cache:v2"
+const CACHE_KEY = "github-command-center:dashboard-cache:v4:session"
+const PUBLIC_CACHE_KEY = "github-command-center:dashboard-cache:v4:public:jskoiz"
 
 function createStorage(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial))
@@ -65,14 +64,14 @@ describe("dashboard cache", () => {
       [CACHE_KEY]: JSON.stringify({ cachedAt: 1_000, payload }),
     })
 
-    expect(readDashboardCacheFromStorage(storage)).toEqual({ cachedAt: 1_000, payload })
+    expect(readDashboardCacheFromStorage(storage, "session")).toEqual({ cachedAt: 1_000, payload })
     expect(storage.removeItem).not.toHaveBeenCalled()
   })
 
   it("rejects malformed JSON and removes it", () => {
     const storage = createStorage({ [CACHE_KEY]: "not-json" })
 
-    expect(readDashboardCacheFromStorage(storage)).toBeNull()
+    expect(readDashboardCacheFromStorage(storage, "session")).toBeNull()
     expect(storage.removeItem).toHaveBeenCalledWith(CACHE_KEY)
   })
 
@@ -84,7 +83,7 @@ describe("dashboard cache", () => {
       }),
     })
 
-    expect(readDashboardCacheFromStorage(storage)).toBeNull()
+    expect(readDashboardCacheFromStorage(storage, "session")).toBeNull()
     expect(storage.removeItem).toHaveBeenCalledWith(CACHE_KEY)
   })
 
@@ -97,7 +96,7 @@ describe("dashboard cache", () => {
       [CACHE_KEY]: JSON.stringify({ cachedAt: 1_000, payload }),
     })
 
-    expect(readDashboardCacheFromStorage(storage)).toBeNull()
+    expect(readDashboardCacheFromStorage(storage, "session")).toBeNull()
     expect(storage.removeItem).toHaveBeenCalledWith(CACHE_KEY)
   })
 
@@ -114,7 +113,7 @@ describe("dashboard cache", () => {
       }),
     })
 
-    expect(readDashboardCacheFromStorage(storage)).toBeNull()
+    expect(readDashboardCacheFromStorage(storage, "session")).toBeNull()
     expect(storage.removeItem).toHaveBeenCalledWith(CACHE_KEY)
   })
 
@@ -124,13 +123,13 @@ describe("dashboard cache", () => {
       throw new Error("quota exceeded")
     })
 
-    expect(() => writeDashboardCacheToStorage(storage, createPayload())).not.toThrow()
+    expect(() => writeDashboardCacheToStorage(storage, "session", createPayload())).not.toThrow()
   })
 
   it("does not persist quick payloads", () => {
     const storage = createStorage()
 
-    writeDashboardCacheToStorage(storage, createPayload({ detailLevel: "quick" }))
+    writeDashboardCacheToStorage(storage, "session", createPayload({ detailLevel: "quick" }))
 
     expect(storage.setItem).not.toHaveBeenCalled()
   })
@@ -138,16 +137,25 @@ describe("dashboard cache", () => {
   it("clears the browser session cache", () => {
     window.sessionStorage.setItem(CACHE_KEY, "cached")
 
-    clearDashboardCache()
+    clearDashboardCache("session")
 
     expect(window.sessionStorage.getItem(CACHE_KEY)).toBeNull()
   })
 
-  it("removes the legacy localStorage cache key", () => {
-    const storage = createStorage({ [LEGACY_CACHE_KEY]: "stale" })
+  it("isolates public profile caches from the signed-in cache", () => {
+    const payload = createPayload()
+    const publicPayload = createPayload({
+      viewer: {
+        ...payload.viewer,
+        name: "public jskoiz",
+      },
+    })
+    const storage = createStorage()
 
-    removeLegacyDashboardCache(storage)
+    writeDashboardCacheToStorage(storage, "session", payload)
+    writeDashboardCacheToStorage(storage, "public:jskoiz", publicPayload)
 
-    expect(storage.removeItem).toHaveBeenCalledWith(LEGACY_CACHE_KEY)
+    expect(JSON.parse(storage.values.get(CACHE_KEY) ?? "{}").payload.viewer.name).toBe("saburo")
+    expect(JSON.parse(storage.values.get(PUBLIC_CACHE_KEY) ?? "{}").payload.viewer.name).toBe("public jskoiz")
   })
 })

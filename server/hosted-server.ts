@@ -64,6 +64,8 @@ type DashboardLoaderOptions = {
   }
 }
 
+type PublicDashboardLoaderOptions = Omit<DashboardLoaderOptions, "auth">
+
 type HostedLogger = Pick<Console, "error" | "warn">
 
 export type HostedServerDependencies = {
@@ -88,6 +90,7 @@ export type HostedServerDependencies = {
   }): Promise<void>
   rateLimiters: HostedRateLimiters
   loadDashboard(options: DashboardLoaderOptions): Promise<unknown>
+  loadPublicDashboard(username: string, options: PublicDashboardLoaderOptions): Promise<unknown>
   readFile(path: string): Promise<Buffer>
   stat(path: string): Promise<StaticFileStat>
   logger: HostedLogger
@@ -141,6 +144,8 @@ async function handleRequest(
   if (url.pathname === "/auth/login") return handleLogin(dependencies, baseUrl, req, res)
   if (url.pathname === "/auth/callback") return handleCallback(dependencies, baseUrl, req, res, url)
   if (url.pathname === "/auth/logout") return handleLogout(dependencies, req, res)
+  const publicDashboardUsername = publicDashboardUsernameFromPath(url.pathname)
+  if (publicDashboardUsername) return handlePublicDashboard(dependencies, req, res, url, publicDashboardUsername)
   if (url.pathname === "/api/dashboard") return handleDashboard(dependencies, req, res, url)
   if (url.pathname === "/healthz") {
     sendJson(res, 200, { ok: true })
@@ -156,6 +161,11 @@ function handleLogin(
   req: IncomingMessage,
   res: ServerResponse
 ) {
+  if (!isOAuthConfigured(dependencies)) {
+    sendJson(res, 503, oauthUnavailablePayload())
+    return
+  }
+
   const limit = dependencies.rateLimiters.auth.check(`auth:${remoteAddressBucket(req, dependencies.trustProxy ?? false)}`)
   if (!limit.allowed) {
     sendRateLimit(res, limit)
@@ -185,6 +195,11 @@ async function handleCallback(
   res: ServerResponse,
   url: URL
 ) {
+  if (!isOAuthConfigured(dependencies)) {
+    sendJson(res, 503, oauthUnavailablePayload())
+    return
+  }
+
   const limit = dependencies.rateLimiters.auth.check(`auth:${remoteAddressBucket(req, dependencies.trustProxy ?? false)}`)
   if (!limit.allowed) {
     sendRateLimit(res, limit)
@@ -218,7 +233,7 @@ async function handleCallback(
       }),
       serializeCookie(STATE_COOKIE, "", { maxAgeSeconds: 0, secure: dependencies.secureCookies }),
     ])
-    res.setHeader("Location", "/")
+    res.setHeader("Location", "/dashboard")
     res.end()
   } catch (error) {
     dependencies.logger.error("OAuth callback failed:", error)
@@ -244,14 +259,16 @@ async function handleLogout(
 
   if (session) {
     revokeSessionId(session.id, session.issuedAt + SESSION_COOKIE_MAX_AGE * 1000)
-    try {
-      await dependencies.revokeOAuthToken({
-        clientId: dependencies.clientId,
-        clientSecret: dependencies.clientSecret,
-        token: session.token,
-      })
-    } catch (error) {
-      dependencies.logger.warn("GitHub OAuth token revocation failed:", error)
+    if (isOAuthConfigured(dependencies)) {
+      try {
+        await dependencies.revokeOAuthToken({
+          clientId: dependencies.clientId,
+          clientSecret: dependencies.clientSecret,
+          token: session.token,
+        })
+      } catch (error) {
+        dependencies.logger.warn("GitHub OAuth token revocation failed:", error)
+      }
     }
   }
 
@@ -275,7 +292,13 @@ async function handleDashboard(
 
   if (!session) {
     res.setHeader("x-gcc-auth", "oauth")
-    sendJson(res, 401, { message: "Sign in with GitHub to load the dashboard.", loginUrl: "/auth/login" })
+    sendJson(
+      res,
+      401,
+      isOAuthConfigured(dependencies)
+        ? { message: "Sign in with GitHub to load the dashboard.", loginUrl: "/auth/login" }
+        : oauthUnavailablePayload()
+    )
     return
   }
 
@@ -314,6 +337,43 @@ async function handleDashboard(
   }
 }
 
+async function handlePublicDashboard(
+  dependencies: HostedServerDependencies,
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  username: string
+) {
+  try {
+    const force = url.searchParams.get("refresh") === "1"
+    const quick = url.searchParams.get("quick") === "1"
+    const limit = dashboardRateLimiter(dependencies.rateLimiters, { force, quick }).check(
+      `${dashboardRateLimitPrefix({ force, quick })}:public:${username.toLowerCase()}:${remoteAddressBucket(req, dependencies.trustProxy ?? false)}`
+    )
+    if (!limit.allowed) {
+      sendRateLimit(res, limit, { authHeader: false })
+      return
+    }
+
+    const payload = await dependencies.loadPublicDashboard(username, {
+      force,
+      quick,
+      scanLimit: Number(url.searchParams.get("scanLimit") ?? 24),
+    })
+    res.setHeader("x-gcc-auth", "public")
+    sendJson(res, 200, payload)
+  } catch (error) {
+    const status = (error as { status?: number }).status
+    const message = error instanceof Error ? error.message : "Public dashboard request failed."
+    sendJson(res, status && status >= 400 && status < 600 ? status : 500, { message })
+  }
+}
+
+function publicDashboardUsernameFromPath(pathname: string): string | null {
+  const match = pathname.match(/^\/api\/dashboard\/([^/?#]+)$/)
+  return match ? decodeURIComponent(match[1]) : null
+}
+
 function remoteAddressBucket(req: IncomingMessage, trustProxy: boolean) {
   if (trustProxy) {
     const forwarded = req.headers["x-forwarded-for"]
@@ -344,6 +404,16 @@ function dashboardRateLimitPrefix(request: { force: boolean; quick: boolean }) {
   return "full"
 }
 
+function isOAuthConfigured(dependencies: HostedServerDependencies) {
+  return Boolean(dependencies.clientId && dependencies.clientSecret)
+}
+
+function oauthUnavailablePayload() {
+  return {
+    message: "GitHub OAuth is not configured. Open /:username to view a public profile dashboard.",
+  }
+}
+
 function pruneExpiredRevocations() {
   const now = Date.now()
   for (const [id, expiresAt] of revokedSessionIds) {
@@ -357,7 +427,13 @@ function sendExpiredSession(dependencies: HostedServerDependencies, res: ServerR
     serializeCookie(SESSION_COOKIE, "", { maxAgeSeconds: 0, secure: dependencies.secureCookies })
   )
   res.setHeader("x-gcc-auth", "oauth")
-  sendJson(res, 401, { message: "GitHub session expired. Sign in again.", loginUrl: "/auth/login" })
+  sendJson(
+    res,
+    401,
+    isOAuthConfigured(dependencies)
+      ? { message: "GitHub session expired. Sign in again.", loginUrl: "/auth/login" }
+      : oauthUnavailablePayload()
+  )
 }
 
 async function serveStatic(dependencies: HostedServerDependencies, res: ServerResponse, pathname: string) {

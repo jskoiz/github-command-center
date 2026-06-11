@@ -3,22 +3,18 @@ import {
   CircleDotIcon,
   LogOutIcon,
   MoonIcon,
-  PanelLeftIcon,
   RefreshCcwIcon,
   SearchIcon,
   SlidersHorizontalIcon,
   SunIcon,
-  Table2Icon,
   XIcon,
 } from "lucide-react"
 import { SiGithub } from "react-icons/si"
 
-import { ActivityPanels } from "@/components/dashboard/ActivityPanels"
 import { AttentionStrip } from "@/components/dashboard/AttentionStrip"
 import { FocusView } from "@/components/dashboard/FocusView"
 import { DashboardSkeleton } from "@/components/dashboard/DashboardSkeleton"
 import { OperationalRail } from "@/components/dashboard/OperationalRail"
-import { RepoTable, type RepoSort, type RepoSortKey } from "@/components/dashboard/RepoTable"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
@@ -41,6 +37,7 @@ import {
   type DashboardCacheEntry,
   writeDashboardCache,
 } from "@/lib/dashboard-cache"
+import { createDemoDashboard } from "@/lib/demo-dashboard"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -57,20 +54,50 @@ import { cn } from "@/lib/utils"
 import type { DashboardPayload, RepoSummary } from "@/types/github"
 
 const THEME_STORAGE_KEY = "github-command-center:theme"
-const VIEW_MODE_STORAGE_KEY = "github-command-center:view-mode"
 type Theme = "light" | "dark"
+type AuthMode = "local" | "oauth" | "public" | "demo"
 export type RepoScope = "active" | "all" | "hidden"
-export type ViewMode = "table" | "focus"
+type RepoSortKey =
+  | "fullName"
+  | "language"
+  | "visibility"
+  | "openPullRequests"
+  | "openIssues"
+  | "checkState"
+  | "pushedAt"
+  | "updatedAt"
+  | "stars"
+  | "forks"
+  | "sizeKb"
+  | "defaultBranch"
+  | "lastCommitAt"
+  | "lastPullRequestAt"
+type RepoSort = {
+  key: RepoSortKey
+  direction: "asc" | "desc"
+}
 
-function getInitialViewMode(): ViewMode {
-  if (typeof window === "undefined") return "table"
-  try {
-    const stored = window.localStorage.getItem(VIEW_MODE_STORAGE_KEY)
-    if (stored === "table" || stored === "focus") return stored
-  } catch {
-    // View mode is best-effort; default to the table view.
-  }
-  return "table"
+const RESERVED_PUBLIC_PATHS = new Set(["api", "assets", "auth", "dashboard", "demo", "healthz"])
+const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
+
+function getPublicUsernameFromPath(): string | null {
+  if (typeof window === "undefined") return null
+  const segments = window.location.pathname.split("/").filter(Boolean)
+  if (segments.length !== 1) return null
+
+  const username = decodeURIComponent(segments[0] ?? "")
+  if (RESERVED_PUBLIC_PATHS.has(username.toLowerCase())) return null
+  return GITHUB_LOGIN_PATTERN.test(username) ? username : null
+}
+
+function isSignedDashboardPath(): boolean {
+  if (typeof window === "undefined") return false
+  return window.location.pathname.replace(/\/+$/, "") === "/dashboard"
+}
+
+function isDemoPath(): boolean {
+  if (typeof window === "undefined") return false
+  return window.location.pathname.replace(/\/+$/, "") === "/demo"
 }
 
 function getInitialTheme(): Theme {
@@ -85,10 +112,17 @@ function getInitialTheme(): Theme {
 }
 
 function App() {
-  const [initialDashboardCache] = useState<DashboardCacheEntry | null>(() => readDashboardCache())
-  const [data, setData] = useState<DashboardPayload | null>(null)
+  const publicUsername = useMemo(() => getPublicUsernameFromPath(), [])
+  const signedDashboard = useMemo(() => isSignedDashboardPath(), [])
+  const demoMode = useMemo(() => isDemoPath(), [])
+  const shouldLoadDashboard = Boolean(publicUsername || signedDashboard || demoMode)
+  const dashboardSourceKey = demoMode ? "demo" : publicUsername ? `public:${publicUsername.toLowerCase()}` : "session"
+  const [initialDashboardCache] = useState<DashboardCacheEntry | null>(() => (
+    shouldLoadDashboard && !demoMode ? readDashboardCache(dashboardSourceKey) : null
+  ))
+  const [data, setData] = useState<DashboardPayload | null>(() => demoMode ? createDemoDashboard() : null)
   const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(shouldLoadDashboard && !demoMode)
   const [refreshing, setRefreshing] = useState(false)
   const [updatingDetails, setUpdatingDetails] = useState(false)
   const [query, setQuery] = useState("")
@@ -96,15 +130,12 @@ function App() {
   const [language, setLanguage] = useState("all")
   const [ciState, setCiState] = useState("all")
   const [sort, setSort] = useState<RepoSort>({ key: "pushedAt", direction: "desc" })
-  const [pageIndex, setPageIndex] = useState(0)
-  const [pageSize, setPageSize] = useState(15)
   const [repoScope, setRepoScope] = useState<RepoScope>("active")
-  const [viewMode, setViewMode] = useState<ViewMode>(() => getInitialViewMode())
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme())
   const [dismissedRunIds, setDismissedRunIds] = useState<Set<number>>(() => loadDismissedRuns())
   const [hiddenRepoIds, setHiddenRepoIds] = useState<Set<number>>(() => loadHiddenRepos())
-  const [authMode, setAuthMode] = useState<"local" | "oauth">("local")
+  const [authMode, setAuthMode] = useState<AuthMode>(() => demoMode ? "demo" : publicUsername ? "public" : "local")
   const [needsLogin, setNeedsLogin] = useState(false)
   const searchInputRef = useRef<HTMLInputElement>(null)
 
@@ -119,18 +150,6 @@ function App() {
   useEffect(() => {
     saveHiddenRepos(hiddenRepoIds)
   }, [hiddenRepoIds])
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(VIEW_MODE_STORAGE_KEY, viewMode)
-    } catch {
-      // View mode is best-effort; the toggle still works for this session.
-    }
-  }, [viewMode])
-
-  const toggleViewMode = useCallback(() => {
-    setViewMode((current) => (current === "table" ? "focus" : "table"))
-  }, [])
 
   const handleDismissRun = useCallback((id: number) => {
     setDismissedRunIds((current) => new Set(current).add(id))
@@ -161,15 +180,37 @@ function App() {
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [])
 
+  const dashboardApiPath = useCallback((options: { force?: boolean; quick?: boolean } = {}) => {
+    const base = publicUsername ? `/api/dashboard/${encodeURIComponent(publicUsername)}` : "/api/dashboard"
+    const params = new URLSearchParams()
+    if (options.force) params.set("refresh", "1")
+    if (options.quick) params.set("quick", "1")
+    const queryString = params.toString()
+    return queryString ? `${base}?${queryString}` : base
+  }, [publicUsername])
+
+  const applyAuthHeader = useCallback((response: Response) => {
+    const responseAuth = response.headers.get("x-gcc-auth")
+    if (responseAuth === "oauth" || responseAuth === "public") setAuthMode(responseAuth)
+  }, [])
+
   const loadDashboard = useCallback(async (force = false) => {
     setError(null)
     setRefreshing(force)
 
+    if (demoMode) {
+      setData(createDemoDashboard())
+      setNeedsLogin(false)
+      setLoading(false)
+      setRefreshing(false)
+      return
+    }
+
     try {
-      const response = await fetch(`/api/dashboard${force ? "?refresh=1" : ""}`)
-      if (response.headers.get("x-gcc-auth") === "oauth") setAuthMode("oauth")
-      if (response.status === 401) {
-        clearDashboardCache()
+      const response = await fetch(dashboardApiPath({ force }))
+      applyAuthHeader(response)
+      if (response.status === 401 && response.headers.get("x-gcc-auth") === "oauth") {
+        clearDashboardCache(dashboardSourceKey)
         setData(null)
         setNeedsLogin(true)
         return
@@ -180,24 +221,26 @@ function App() {
       const payload = await response.json() as DashboardPayload
       setNeedsLogin(false)
       setData(payload)
-      writeDashboardCache(payload)
+      writeDashboardCache(dashboardSourceKey, payload)
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Dashboard request failed.")
     } finally {
       setLoading(false)
       setRefreshing(false)
     }
-  }, [])
+  }, [applyAuthHeader, dashboardApiPath, dashboardSourceKey, demoMode])
 
   useEffect(() => {
+    if (!shouldLoadDashboard || demoMode) return
+
     let cancelled = false
     const controller = new AbortController()
 
     async function fetchDashboard(path: string) {
       const response = await fetch(path, { signal: controller.signal })
-      if (!cancelled && response.headers.get("x-gcc-auth") === "oauth") setAuthMode("oauth")
-      if (response.status === 401) {
-        clearDashboardCache()
+      if (!cancelled) applyAuthHeader(response)
+      if (response.status === 401 && response.headers.get("x-gcc-auth") === "oauth") {
+        clearDashboardCache(dashboardSourceKey)
         if (!cancelled) {
           setData(null)
           setNeedsLogin(true)
@@ -214,7 +257,7 @@ function App() {
     async function loadInitialDashboard() {
       let quickPayload: DashboardPayload | null = null
       try {
-        quickPayload = await fetchDashboard("/api/dashboard?quick=1")
+        quickPayload = await fetchDashboard(dashboardApiPath({ quick: true }))
         if (!cancelled) {
           if (!quickPayload) {
             setLoading(false)
@@ -243,10 +286,10 @@ function App() {
 
       if (!cancelled) setUpdatingDetails(true)
       try {
-        const payload = await fetchDashboard("/api/dashboard")
+        const payload = await fetchDashboard(dashboardApiPath())
         if (!cancelled && payload) {
           setData(payload)
-          writeDashboardCache(payload)
+          writeDashboardCache(dashboardSourceKey, payload)
         }
       } catch (requestError) {
         if (!cancelled && !isAbortError(requestError)) {
@@ -263,7 +306,7 @@ function App() {
       cancelled = true
       controller.abort()
     }
-  }, [initialDashboardCache])
+  }, [applyAuthHeader, dashboardApiPath, dashboardSourceKey, demoMode, initialDashboardCache, shouldLoadDashboard])
 
   const languages = useMemo(() => {
     if (!data) return []
@@ -322,52 +365,20 @@ function App() {
       .sort((a, b) => compareRepos(a, b, sort))
   }, [ciState, data, hiddenRepoIds, language, query, repoScope, sort, visibility, visibleRepos])
 
-  const safePageIndex = Math.min(pageIndex, Math.max(0, Math.ceil(filteredRepos.length / pageSize) - 1))
-  const pagedRepos = useMemo(() => {
-    return filteredRepos.slice(safePageIndex * pageSize, safePageIndex * pageSize + pageSize)
-  }, [filteredRepos, pageSize, safePageIndex])
-
-  const handleSort = useCallback((key: RepoSortKey) => {
-    setPageIndex(0)
-    setSort((current) => ({
-      key,
-      direction: current.key === key && current.direction === "desc" ? "asc" : "desc",
-    }))
-  }, [])
-
   const handleVisibilityChange = useCallback((value: string) => {
     setVisibility(value)
-    setPageIndex(0)
   }, [])
 
   const handleLanguageChange = useCallback((value: string) => {
     setLanguage(value)
-    setPageIndex(0)
   }, [])
 
   const handleCiStateChange = useCallback((value: string) => {
     setCiState(value)
-    setPageIndex(0)
-  }, [])
-
-  const handlePageSizeChange = useCallback((value: number) => {
-    setPageSize(value)
-    setPageIndex(0)
   }, [])
 
   const handleQueryChange = useCallback((value: string) => {
     setQuery(value)
-    setPageIndex(0)
-  }, [])
-
-  const hasActiveFilters = query.trim() !== "" || visibility !== "all" || language !== "all" || ciState !== "all"
-
-  const handleClearFilters = useCallback(() => {
-    setQuery("")
-    setVisibility("all")
-    setLanguage("all")
-    setCiState("all")
-    setPageIndex(0)
   }, [])
 
   const toggleTheme = useCallback(() => {
@@ -376,7 +387,6 @@ function App() {
 
   const handleRepoScopeChange = useCallback((value: RepoScope) => {
     setRepoScope(value)
-    setPageIndex(0)
   }, [])
 
   const handleToggleRepoHidden = useCallback((id: number) => {
@@ -397,7 +407,6 @@ function App() {
     setLanguage("all")
     setCiState("all")
     setRepoScope("all")
-    setPageIndex(0)
   }, [])
 
   const handleShowFailing = useCallback(() => {
@@ -415,8 +424,8 @@ function App() {
     setSort({ key: "openIssues", direction: "desc" })
   }, [showAttentionScope])
 
-  if (needsLogin) {
-    return <SignInScreen />
+  if (!shouldLoadDashboard || needsLogin) {
+    return <LandingScreen />
   }
 
   if (loading) {
@@ -437,11 +446,9 @@ function App() {
             refreshing={refreshing}
             updatingDetails={updatingDetails}
             theme={theme}
-            viewMode={viewMode}
             authMode={authMode}
             searchInputRef={searchInputRef}
             onThemeToggle={toggleTheme}
-            onViewModeToggle={toggleViewMode}
             onQueryChange={handleQueryChange}
             onVisibilityChange={handleVisibilityChange}
             onLanguageChange={handleLanguageChange}
@@ -463,52 +470,22 @@ function App() {
                   onShowIssues={handleShowIssues}
                 />
                 <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px] 2xl:grid-cols-[minmax(0,1fr)_340px]">
-                  {viewMode === "focus" ? (
-                    <FocusView
-                      repos={filteredRepos}
-                      scope={repoScope}
-                      activeCount={activeCount}
-                      totalCount={visibleRepos.length}
-                      hiddenCount={hiddenRepoIds.size}
-                      commits={visibleActivity.commits}
-                      pullRequests={visibleActivity.pullRequests}
-                      issues={visibleActivity.issues}
-                      isUpdating={data.detailLevel === "quick"}
-                      selectedRepo={selectedRepo}
-                      viewerLogin={data.viewer.login}
-                      onScopeChange={handleRepoScopeChange}
-                      onSelectRepo={setSelectedRepo}
-                      onToggleRepoHidden={handleToggleRepoHidden}
-                    />
-                  ) : (
-                  <div className="grid min-h-0 gap-3 lg:grid-rows-[minmax(0,1fr)_190px]">
-                    <RepoTable
-                      repos={pagedRepos}
-                      totalCount={visibleRepos.length}
-                      filteredCount={filteredRepos.length}
-                      pageIndex={safePageIndex}
-                      pageSize={pageSize}
-                      sort={sort}
-                      viewerLogin={data.viewer.login}
-                      hasActiveFilters={hasActiveFilters}
-                      scope={repoScope}
-                      activeCount={activeCount}
-                      hiddenCount={hiddenRepoIds.size}
-                      onScopeChange={handleRepoScopeChange}
-                      onToggleRepoHidden={handleToggleRepoHidden}
-                      onClearFilters={handleClearFilters}
-                      onPageChange={setPageIndex}
-                      onPageSizeChange={handlePageSizeChange}
-                      onSort={handleSort}
-                    />
-                    <ActivityPanels
-                      commits={visibleActivity.commits}
-                      pullRequests={visibleActivity.pullRequests}
-                      issues={visibleActivity.issues}
-                      isUpdating={data.detailLevel === "quick"}
-                    />
-                  </div>
-                  )}
+                  <FocusView
+                    repos={filteredRepos}
+                    scope={repoScope}
+                    activeCount={activeCount}
+                    totalCount={visibleRepos.length}
+                    hiddenCount={hiddenRepoIds.size}
+                    commits={visibleActivity.commits}
+                    pullRequests={visibleActivity.pullRequests}
+                    issues={visibleActivity.issues}
+                    isUpdating={data.detailLevel === "quick"}
+                    selectedRepo={selectedRepo}
+                    viewerLogin={data.viewer.login}
+                    onScopeChange={handleRepoScopeChange}
+                    onSelectRepo={setSelectedRepo}
+                    onToggleRepoHidden={handleToggleRepoHidden}
+                  />
                   <OperationalRail
                     billing={data.billing}
                     detailLevel={data.detailLevel}
@@ -538,11 +515,9 @@ function Header({
   refreshing,
   updatingDetails,
   theme,
-  viewMode,
   authMode,
   searchInputRef,
   onThemeToggle,
-  onViewModeToggle,
   onQueryChange,
   onVisibilityChange,
   onLanguageChange,
@@ -558,11 +533,9 @@ function Header({
   refreshing: boolean
   updatingDetails: boolean
   theme: Theme
-  viewMode: ViewMode
-  authMode: "local" | "oauth"
+  authMode: AuthMode
   searchInputRef: RefObject<HTMLInputElement | null>
   onThemeToggle: () => void
-  onViewModeToggle: () => void
   onQueryChange: (value: string) => void
   onVisibilityChange: (value: string) => void
   onLanguageChange: (value: string) => void
@@ -641,10 +614,6 @@ function Header({
               {updatingDetails ? "Updating" : data ? `Refreshed ${formatRelative(data.generatedAt)}` : "Ready"}
             </span>
           </div>
-          <Button variant="ghost" size="icon" onClick={onViewModeToggle} title={viewMode === "table" ? "Switch to focus view" : "Switch to table view"}>
-            {viewMode === "table" ? <PanelLeftIcon className="size-4" aria-hidden="true" /> : <Table2Icon className="size-4" aria-hidden="true" />}
-            <span className="sr-only">Switch to {viewMode === "table" ? "focus" : "table"} view</span>
-          </Button>
           <Button variant="ghost" size="icon" onClick={onThemeToggle}>
             {theme === "dark" ? <SunIcon className="size-4" aria-hidden="true" /> : <MoonIcon className="size-4" aria-hidden="true" />}
             <span className="sr-only">Switch to {theme === "dark" ? "light" : "dark"} theme</span>
@@ -754,27 +723,60 @@ function HeaderFilters({
   )
 }
 
-function SignInScreen() {
+function LandingScreen() {
+  const [username, setUsername] = useState("")
+  const normalizedUsername = username.trim()
+  const publicPath = GITHUB_LOGIN_PATTERN.test(normalizedUsername)
+    ? `/${encodeURIComponent(normalizedUsername)}`
+    : "/"
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background p-6 text-foreground">
-      <div className="flex w-full max-w-sm flex-col items-center gap-4 rounded-xl border bg-card p-8 text-center shadow-sm">
-        <SiGithub className="size-10" aria-hidden="true" />
-        <div>
-          <h1 className="text-lg font-semibold">GitHub Command Center</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Repos, PRs, issues, CI health, and Actions billing in one dense view.
+    <div className="grid min-h-screen place-items-center bg-background px-5 py-10 text-foreground">
+      <div className="flex w-full max-w-md flex-col gap-7">
+        <a href="/" className="flex w-fit items-center gap-2 text-lg font-semibold" aria-label="okgithub home">
+          <SiGithub className="size-8" aria-hidden="true" />
+          okgithub
+        </a>
+        <div className="space-y-3">
+          <h1 className="text-3xl font-semibold leading-tight sm:text-4xl">
+            An actual usable GitHub homepage.
+          </h1>
+          <p className="text-base leading-7 text-muted-foreground">
+            Public view is instant: PRs, issues, commits, CI, and repos. Enter a username. No login required.
           </p>
         </div>
-        <Button size="lg" className="w-full" asChild>
-          <a href="/auth/login">
-            <SiGithub data-icon="inline-start" aria-hidden="true" />
-            Sign in with GitHub
-          </a>
-        </Button>
-        <p className="text-xs text-muted-foreground">
-          Requests repo and user scopes to read your repositories, workflow runs, and Actions billing.
-          Your token stays in an encrypted cookie in your browser.
-        </p>
+        <form action={publicPath} className="flex flex-col gap-2 sm:flex-row">
+          <Input
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            placeholder="jskoiz"
+            aria-label="GitHub username"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            className="h-11 bg-card text-base sm:flex-1"
+          />
+          <Button type="submit" size="lg" disabled={!GITHUB_LOGIN_PATTERN.test(normalizedUsername)}>
+            Open public view
+          </Button>
+        </form>
+        <div className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center">
+          <Button variant="secondary" size="lg" className="w-full sm:w-fit" asChild>
+            <a href="/demo">View demo</a>
+          </Button>
+          <span>Sample data, no GitHub calls.</span>
+        </div>
+        <div className="space-y-3 border-t pt-5">
+          <p className="text-sm leading-6 text-muted-foreground">
+            Want the full version? Sign in for private repos, workflow runs, billing, and everything your token can read.
+          </p>
+          <Button variant="outline" size="lg" className="w-full sm:w-fit" asChild>
+            <a href="/auth/login">
+              <SiGithub data-icon="inline-start" aria-hidden="true" />
+              Sign in for full view
+            </a>
+          </Button>
+        </div>
       </div>
     </div>
   )

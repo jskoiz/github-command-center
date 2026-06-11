@@ -43,6 +43,16 @@ export function createTokenExecutor(token: string): GhExecutor {
   }
 }
 
+export function createPublicExecutor(token: string | null = null): GhExecutor {
+  return async (args, endpoint) => {
+    const parsed = parseGhArgs(args)
+    if (parsed.target === "graphql") {
+      throw createApiError("GitHub GraphQL API requires authentication.", endpoint, 401)
+    }
+    return executeRest(token, parsed, endpoint)
+  }
+}
+
 type ParsedGhArgs = {
   target: string
   headers: Record<string, string>
@@ -92,7 +102,7 @@ function parseGhArgs(args: string[]): ParsedGhArgs {
   return parsed
 }
 
-async function executeRest(token: string, parsed: ParsedGhArgs, endpoint: string): Promise<string> {
+async function executeRest(token: string | null, parsed: ParsedGhArgs, endpoint: string): Promise<string> {
   let url = toApiUrl(parsed.target)
   const pages: unknown[] = []
   const maxPages = parsed.paginate ? MAX_PAGINATED_PAGES : 1
@@ -142,7 +152,7 @@ async function executeGraphql(token: string, parsed: ParsedGhArgs, endpoint: str
 }
 
 async function githubFetch(
-  token: string,
+  token: string | null,
   url: string,
   headers: Record<string, string>,
   endpoint: string,
@@ -153,7 +163,7 @@ async function githubFetch(
     body: init.body,
     headers: {
       Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${token}`,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       "User-Agent": "github-command-center",
       ...headers,
     },

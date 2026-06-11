@@ -1,7 +1,6 @@
 import type { BillingSummary, DashboardPayload, Viewer } from "@/types/github"
 
-const DASHBOARD_CACHE_KEY = "github-command-center:dashboard-cache:v3"
-const LEGACY_DASHBOARD_CACHE_KEY = "github-command-center:dashboard-cache:v2"
+const DASHBOARD_CACHE_KEY_PREFIX = "github-command-center:dashboard-cache:v4"
 export const DASHBOARD_CACHE_MAX_AGE_MS = 10 * 60 * 1000
 
 export type DashboardCacheEntry = {
@@ -11,24 +10,23 @@ export type DashboardCacheEntry = {
 
 type StorageLike = Pick<Storage, "getItem" | "removeItem" | "setItem">
 
-export function readDashboardCache(): DashboardCacheEntry | null {
+export function readDashboardCache(sourceKey: string): DashboardCacheEntry | null {
   if (typeof window === "undefined") return null
 
-  removeLegacyDashboardCache(window.localStorage)
-  return readDashboardCacheFromStorage(window.sessionStorage)
+  return readDashboardCacheFromStorage(window.sessionStorage, sourceKey)
 }
 
-export function writeDashboardCache(payload: DashboardPayload) {
+export function writeDashboardCache(sourceKey: string, payload: DashboardPayload) {
   if (typeof window === "undefined" || payload.detailLevel !== "full") return
 
-  writeDashboardCacheToStorage(window.sessionStorage, payload)
+  writeDashboardCacheToStorage(window.sessionStorage, sourceKey, payload)
 }
 
-export function clearDashboardCache() {
+export function clearDashboardCache(sourceKey: string) {
   if (typeof window === "undefined") return
 
   try {
-    window.sessionStorage.removeItem(DASHBOARD_CACHE_KEY)
+    window.sessionStorage.removeItem(dashboardCacheKey(sourceKey))
   } catch {
     // Ignore storage access errors; cache cleanup must not block auth recovery.
   }
@@ -38,29 +36,31 @@ export function isDashboardCacheFresh(entry: DashboardCacheEntry) {
   return Date.now() - entry.cachedAt <= DASHBOARD_CACHE_MAX_AGE_MS
 }
 
-export function readDashboardCacheFromStorage(storage: StorageLike): DashboardCacheEntry | null {
+export function readDashboardCacheFromStorage(storage: StorageLike, sourceKey: string): DashboardCacheEntry | null {
+  const cacheKey = dashboardCacheKey(sourceKey)
+
   try {
-    const raw = storage.getItem(DASHBOARD_CACHE_KEY)
+    const raw = storage.getItem(cacheKey)
     if (!raw) return null
 
     const parsed = JSON.parse(raw) as unknown
     if (!isDashboardCacheEntry(parsed)) {
-      storage.removeItem(DASHBOARD_CACHE_KEY)
+      storage.removeItem(cacheKey)
       return null
     }
 
     return parsed
   } catch {
-    storage.removeItem(DASHBOARD_CACHE_KEY)
+    storage.removeItem(cacheKey)
     return null
   }
 }
 
-export function writeDashboardCacheToStorage(storage: StorageLike, payload: DashboardPayload) {
+export function writeDashboardCacheToStorage(storage: StorageLike, sourceKey: string, payload: DashboardPayload) {
   if (payload.detailLevel !== "full") return
 
   try {
-    storage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify({
+    storage.setItem(dashboardCacheKey(sourceKey), JSON.stringify({
       cachedAt: Date.now(),
       payload,
     }))
@@ -69,12 +69,8 @@ export function writeDashboardCacheToStorage(storage: StorageLike, payload: Dash
   }
 }
 
-export function removeLegacyDashboardCache(storage: StorageLike) {
-  try {
-    storage.removeItem(LEGACY_DASHBOARD_CACHE_KEY)
-  } catch {
-    // Ignore storage access errors; cache cleanup must not block startup.
-  }
+function dashboardCacheKey(sourceKey: string) {
+  return `${DASHBOARD_CACHE_KEY_PREFIX}:${sourceKey}`
 }
 
 function isDashboardCacheEntry(value: unknown): value is DashboardCacheEntry {
