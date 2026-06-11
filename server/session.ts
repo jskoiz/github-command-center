@@ -5,6 +5,7 @@ const IV_LENGTH = 12
 const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
 
 export type Session = {
+  id: string
   token: string
   login: string
   issuedAt: number
@@ -33,7 +34,12 @@ export function openSession(value: string, key: Buffer): Session | null {
     decipher.setAuthTag(tag)
     const plaintext = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8")
     const parsed = JSON.parse(plaintext) as Session
-    if (typeof parsed.token !== "string" || typeof parsed.login !== "string" || typeof parsed.issuedAt !== "number") {
+    if (
+      typeof parsed.id !== "string" ||
+      typeof parsed.token !== "string" ||
+      typeof parsed.login !== "string" ||
+      typeof parsed.issuedAt !== "number"
+    ) {
       return null
     }
     if (Date.now() - parsed.issuedAt > SESSION_MAX_AGE_MS) return null

@@ -4,6 +4,24 @@ const MAX_PAGINATED_PAGES = 10
 
 export type GhExecutor = (args: string[], endpoint: string) => Promise<string>
 
+export class PaginationLimitError extends Error {
+  readonly endpoint: string
+  readonly pageCount: number
+  readonly partialPages: unknown[]
+
+  constructor(endpoint: string, pageCount: number, partialPages: unknown[]) {
+    super(`GitHub REST pagination reached the hosted page limit after ${pageCount} pages for ${endpoint}.`)
+    this.name = "PaginationLimitError"
+    this.endpoint = endpoint
+    this.pageCount = pageCount
+    this.partialPages = partialPages
+  }
+}
+
+export function isPaginationLimitError(error: unknown): error is PaginationLimitError {
+  return error instanceof PaginationLimitError
+}
+
 type GhApiError = Error & {
   stderr?: string
   endpoint?: string
@@ -77,8 +95,9 @@ function parseGhArgs(args: string[]): ParsedGhArgs {
 async function executeRest(token: string, parsed: ParsedGhArgs, endpoint: string): Promise<string> {
   let url = toApiUrl(parsed.target)
   const pages: unknown[] = []
+  const maxPages = parsed.paginate ? MAX_PAGINATED_PAGES : 1
 
-  for (let page = 0; page < (parsed.paginate ? MAX_PAGINATED_PAGES : 1); page += 1) {
+  for (let page = 0; page < maxPages; page += 1) {
     const response = await githubFetch(token, url, parsed.headers, endpoint)
     const body = await response.text()
     pages.push(body ? JSON.parse(body) : null)
@@ -86,6 +105,9 @@ async function executeRest(token: string, parsed: ParsedGhArgs, endpoint: string
     if (!parsed.paginate) break
     const next = parseNextLink(response.headers.get("link"))
     if (!next) break
+    if (page === maxPages - 1) {
+      throw new PaginationLimitError(endpoint, pages.length, pages)
+    }
     url = next
   }
 
@@ -216,4 +238,30 @@ export async function fetchViewerLogin(token: string): Promise<string> {
   const body = await response.json() as { login?: string }
   if (!body.login) throw new Error("GitHub /user response did not include a login.")
   return body.login
+}
+
+export async function revokeOAuthToken(options: {
+  clientId: string
+  clientSecret: string
+  token: string
+}): Promise<void> {
+  const response = await fetch(`${GITHUB_API_BASE}/applications/${encodeURIComponent(options.clientId)}/token`, {
+    method: "DELETE",
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Basic ${Buffer.from(`${options.clientId}:${options.clientSecret}`, "utf8").toString("base64")}`,
+      "Content-Type": "application/json",
+      "User-Agent": "github-command-center",
+    },
+    body: JSON.stringify({ access_token: options.token }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+
+  if (response.status === 204 || response.status === 404 || response.ok) return
+
+  throw createApiError(
+    `GitHub OAuth token revocation returned ${response.status}.`,
+    "DELETE /applications/{client_id}/token",
+    response.status
+  )
 }

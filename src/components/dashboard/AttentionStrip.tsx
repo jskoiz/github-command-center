@@ -37,10 +37,8 @@ export function AttentionStrip({
     (run) => !dismissedRunIds.has(run.id) && isGithubStatusFailure(run.conclusion ?? run.status)
   )
   const failingRepoCount = new Set(failingRuns.map((run) => run.repo)).size
-  const openPrs = repos.reduce((sum, repo) => sum + (repo.openPullRequests ?? 0), 0)
-  const prRepoCount = repos.filter((repo) => (repo.openPullRequests ?? 0) > 0).length
-  const openIssues = repos.reduce((sum, repo) => sum + (repo.openIssues ?? 0), 0)
-  const issueRepoCount = repos.filter((repo) => (repo.openIssues ?? 0) > 0).length
+  const prCounts = summarizeKnownCounts(repos, (repo) => repo.openPullRequests)
+  const issueCounts = summarizeKnownCounts(repos, (repo) => repo.openIssues)
 
   return (
     <div className="grid shrink-0 grid-cols-2 gap-2 lg:grid-cols-4">
@@ -67,15 +65,15 @@ export function AttentionStrip({
       )}
       <AttentionCard
         icon={<GitPullRequestIcon className="size-4 text-status-info" aria-hidden="true" />}
-        value={formatNumber(openPrs)}
-        label={`open PRs · ${prRepoCount} ${prRepoCount === 1 ? "repo" : "repos"}`}
-        onClick={openPrs > 0 ? onShowPullRequests : undefined}
+        value={formatCountValue(prCounts)}
+        label={formatCountLabel("open PRs", prCounts)}
+        onClick={prCounts.total > 0 ? onShowPullRequests : undefined}
       />
       <AttentionCard
         icon={<CircleDotIcon className="size-4 text-status-success" aria-hidden="true" />}
-        value={formatNumber(openIssues)}
-        label={`open issues · ${issueRepoCount} ${issueRepoCount === 1 ? "repo" : "repos"}`}
-        onClick={openIssues > 0 ? onShowIssues : undefined}
+        value={formatCountValue(issueCounts)}
+        label={formatCountLabel("open issues", issueCounts)}
+        onClick={issueCounts.total > 0 ? onShowIssues : undefined}
       />
       <AttentionCard
         icon={<CircleDollarSignIcon className="size-4 text-muted-foreground" aria-hidden="true" />}
@@ -126,4 +124,44 @@ function AttentionCard({
     return <button type="button" onClick={onClick} className={className}>{body}</button>
   }
   return <div className={className}>{body}</div>
+}
+
+type KnownCountSummary = {
+  total: number
+  repoCount: number
+  unknownCount: number
+}
+
+function summarizeKnownCounts(
+  repos: RepoSummary[],
+  getCount: (repo: RepoSummary) => number | null
+): KnownCountSummary {
+  return repos.reduce<KnownCountSummary>((summary, repo) => {
+    const count = getCount(repo)
+    if (count === null) {
+      summary.unknownCount += 1
+      return summary
+    }
+
+    summary.total += count
+    if (count > 0) summary.repoCount += 1
+    return summary
+  }, {
+    total: 0,
+    repoCount: 0,
+    unknownCount: 0,
+  })
+}
+
+function formatCountValue(summary: KnownCountSummary) {
+  return summary.total === 0 && summary.unknownCount > 0 ? "n/a" : formatNumber(summary.total)
+}
+
+function formatCountLabel(subject: string, summary: KnownCountSummary) {
+  const repoLabel = `${summary.repoCount} ${summary.repoCount === 1 ? "repo" : "repos"}`
+  if (summary.unknownCount === 0) return `${subject} · ${repoLabel}`
+
+  const unknownLabel = `${summary.unknownCount} unknown`
+  if (summary.total === 0 && summary.repoCount === 0) return `${subject} · ${unknownLabel}`
+  return `${subject} · ${repoLabel} · ${unknownLabel}`
 }

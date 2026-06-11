@@ -67,6 +67,13 @@ The OAuth flow requests the `repo` and `user` scopes (private repo metadata,
 workflow runs, and Actions billing). Run it behind HTTPS — cookies are marked
 `Secure` automatically when `BASE_URL` starts with `https://`.
 
+Logout clears the local session, records the session id as revoked for the
+remaining cookie lifetime, and attempts to revoke the GitHub OAuth token.
+In-memory session revocations are process-local, so a server restart clears the
+local revocation list but not a successful GitHub token revocation.
+Hosted OAuth and dashboard requests also use process-local request throttles to
+limit repeated sign-in attempts and expensive dashboard fanout.
+
 ### Docker
 
 ```sh

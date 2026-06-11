@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { DashboardPayload } from "@/types/github"
 import {
+  clearDashboardCache,
   readDashboardCacheFromStorage,
   removeLegacyDashboardCache,
   writeDashboardCacheToStorage,
@@ -132,6 +133,14 @@ describe("dashboard cache", () => {
     writeDashboardCacheToStorage(storage, createPayload({ detailLevel: "quick" }))
 
     expect(storage.setItem).not.toHaveBeenCalled()
+  })
+
+  it("clears the browser session cache", () => {
+    window.sessionStorage.setItem(CACHE_KEY, "cached")
+
+    clearDashboardCache()
+
+    expect(window.sessionStorage.getItem(CACHE_KEY)).toBeNull()
   })
 
   it("removes the legacy localStorage cache key", () => {

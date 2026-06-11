@@ -54,7 +54,11 @@ export function OperationalRail({
 
 function WarningPanel({ warnings }: { warnings: DashboardWarning[] }) {
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
+  const [expanded, setExpanded] = useState(false)
   const visible = warnings.filter((warning) => !dismissed.has(warningKey(warning)))
+  const displayed = expanded ? visible : visible.slice(0, 3)
+  const overflowCount = Math.max(0, visible.length - 3)
+  const hiddenCount = Math.max(0, visible.length - displayed.length)
 
   if (visible.length === 0) return null
 
@@ -64,7 +68,7 @@ function WarningPanel({ warnings }: { warnings: DashboardWarning[] }) {
       <AlertTitle>Partial data</AlertTitle>
       <AlertDescription>
         <div className="flex flex-col gap-2">
-          {visible.slice(0, 3).map((warning) => (
+          {displayed.map((warning) => (
             <div key={warningKey(warning)} className="group relative pr-6">
               <span className="font-medium">{warning.area}: </span>
               <span>{warning.message}</span>
@@ -80,6 +84,19 @@ function WarningPanel({ warnings }: { warnings: DashboardWarning[] }) {
               </Button>
             </div>
           ))}
+          {overflowCount > 0 ? (
+            <Button
+              variant="ghost"
+              size="xs"
+              className="w-fit self-start px-1.5 text-xs text-muted-foreground"
+              aria-expanded={expanded}
+              onClick={() => setExpanded((current) => !current)}
+            >
+              {expanded
+                ? "Show fewer warnings"
+                : `Show ${hiddenCount} more ${hiddenCount === 1 ? "warning" : "warnings"}`}
+            </Button>
+          ) : null}
         </div>
       </AlertDescription>
     </Alert>

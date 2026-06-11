@@ -35,6 +35,7 @@ import {
   TooltipProvider,
 } from "@/components/ui/tooltip"
 import {
+  clearDashboardCache,
   isDashboardCacheFresh,
   readDashboardCache,
   type DashboardCacheEntry,
@@ -85,13 +86,11 @@ function getInitialTheme(): Theme {
 
 function App() {
   const [initialDashboardCache] = useState<DashboardCacheEntry | null>(() => readDashboardCache())
-  const [data, setData] = useState<DashboardPayload | null>(() => initialDashboardCache?.payload ?? null)
+  const [data, setData] = useState<DashboardPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(() => !initialDashboardCache?.payload)
+  const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
-  const [updatingDetails, setUpdatingDetails] = useState(() => (
-    Boolean(initialDashboardCache && !isDashboardCacheFresh(initialDashboardCache))
-  ))
+  const [updatingDetails, setUpdatingDetails] = useState(false)
   const [query, setQuery] = useState("")
   const [visibility, setVisibility] = useState("all")
   const [language, setLanguage] = useState("all")
@@ -170,6 +169,8 @@ function App() {
       const response = await fetch(`/api/dashboard${force ? "?refresh=1" : ""}`)
       if (response.headers.get("x-gcc-auth") === "oauth") setAuthMode("oauth")
       if (response.status === 401) {
+        clearDashboardCache()
+        setData(null)
         setNeedsLogin(true)
         return
       }
@@ -196,7 +197,11 @@ function App() {
       const response = await fetch(path, { signal: controller.signal })
       if (!cancelled && response.headers.get("x-gcc-auth") === "oauth") setAuthMode("oauth")
       if (response.status === 401) {
-        if (!cancelled) setNeedsLogin(true)
+        clearDashboardCache()
+        if (!cancelled) {
+          setData(null)
+          setNeedsLogin(true)
+        }
         return null
       }
       if (!response.ok) {
@@ -207,48 +212,34 @@ function App() {
     }
 
     async function loadInitialDashboard() {
-      if (initialDashboardCache && isDashboardCacheFresh(initialDashboardCache)) {
-        setLoading(false)
-        return
-      }
-
-      if (initialDashboardCache) {
-        if (!cancelled) {
-          setLoading(false)
-          setUpdatingDetails(true)
-        }
-
-        try {
-          const payload = await fetchDashboard("/api/dashboard")
-          if (!cancelled && payload) {
-            setData(payload)
-            writeDashboardCache(payload)
-          }
-        } catch (requestError) {
-          if (!cancelled && !isAbortError(requestError)) {
-            setError(requestError instanceof Error ? requestError.message : "Dashboard request failed.")
-          }
-        } finally {
-          if (!cancelled) setUpdatingDetails(false)
-        }
-        return
-      }
-
-      let unauthorized = false
+      let quickPayload: DashboardPayload | null = null
       try {
-        const payload = await fetchDashboard("/api/dashboard?quick=1")
+        quickPayload = await fetchDashboard("/api/dashboard?quick=1")
         if (!cancelled) {
-          if (payload) setData(payload)
-          else unauthorized = true
+          if (!quickPayload) {
+            setLoading(false)
+            return
+          }
+
+          const cacheMatchesViewer = initialDashboardCache?.payload.viewer.login === quickPayload.viewer.login
+          if (initialDashboardCache && cacheMatchesViewer) {
+            setData(initialDashboardCache.payload)
+            setUpdatingDetails(!isDashboardCacheFresh(initialDashboardCache))
+            setLoading(false)
+            if (isDashboardCacheFresh(initialDashboardCache)) return
+          } else {
+            setData(quickPayload)
+            setUpdatingDetails(true)
+            setLoading(false)
+          }
         }
       } catch (requestError) {
         if (!cancelled && !isAbortError(requestError)) {
           setError(requestError instanceof Error ? requestError.message : "Dashboard request failed.")
+          setLoading(false)
         }
-      } finally {
-        if (!cancelled) setLoading(false)
       }
-      if (unauthorized) return
+      if (cancelled || !quickPayload) return
 
       if (!cancelled) setUpdatingDetails(true)
       try {
@@ -400,21 +391,29 @@ function App() {
     })
   }, [])
 
-  const handleShowFailing = useCallback(() => {
-    setCiState("failure")
+  const showAttentionScope = useCallback(() => {
+    setQuery("")
+    setVisibility("all")
+    setLanguage("all")
+    setCiState("all")
     setRepoScope("all")
     setPageIndex(0)
   }, [])
 
+  const handleShowFailing = useCallback(() => {
+    showAttentionScope()
+    setCiState("failure")
+  }, [showAttentionScope])
+
   const handleShowPullRequests = useCallback(() => {
+    showAttentionScope()
     setSort({ key: "openPullRequests", direction: "desc" })
-    setPageIndex(0)
-  }, [])
+  }, [showAttentionScope])
 
   const handleShowIssues = useCallback(() => {
+    showAttentionScope()
     setSort({ key: "openIssues", direction: "desc" })
-    setPageIndex(0)
-  }, [])
+  }, [showAttentionScope])
 
   if (needsLogin) {
     return <SignInScreen />

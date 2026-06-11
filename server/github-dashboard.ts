@@ -3,7 +3,7 @@ import { execFile } from "node:child_process"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
-import { createTokenExecutor, type GhExecutor } from "./github-client.ts"
+import { createTokenExecutor, isPaginationLimitError, type GhExecutor } from "./github-client.ts"
 import type {
   BillingRepoSummary,
   BillingSkuSummary,
@@ -27,6 +27,8 @@ const RECENT_REPO_ACTIVITY_MS = 7 * 24 * 60 * 60_000
 const REPO_DETAILS_CACHE_PATH = process.env.GITHUB_COMMAND_CENTER_REPO_CACHE
   || join(process.cwd(), ".cache", "github-command-center", "repo-details.json")
 const MAX_BUFFER = 32 * 1024 * 1024
+const GRAPHQL_REPO_PAGE_SIZE = 50
+const MAX_GRAPHQL_REPO_PAGES = 20
 
 type CacheEntry = {
   timestamp: number
@@ -145,6 +147,12 @@ type RawWorkflowRun = {
   updated_at: string
   run_started_at: string | null
   html_url: string
+}
+
+type WorkflowRunFetchResult = {
+  repo: string
+  runs: WorkflowRunSummary[]
+  error?: unknown
 }
 
 type GraphRepoNode = {
@@ -289,8 +297,10 @@ async function loadGithubDashboard({
   const warnings: DashboardWarning[] = []
   const viewer = await getViewer()
   const repos = await getRepos(warnings)
-  const graphRepoData = await getRepoGraphData(viewer.login, warnings)
-  const enrichedRepos = repos.map((repo) => toRepoSummary(repo, graphRepoData.get(repo.full_name)))
+  const graphRepoData = await getRepoGraphData(viewer.login, repos.length, warnings)
+  const enrichedRepos = repos.map((repo) => toRepoSummary(repo, graphRepoData.get(repo.full_name), {
+    useRestIssueFallback: false,
+  }))
   const scanRepos = enrichedRepos.slice(0, scanLimit)
 
   const [repoDetails, runs, pullRequests, issues, billing] = await Promise.all([
@@ -388,6 +398,13 @@ async function getRepos(
     const pages = await ghJson<RawRepo[][]>(endpoint, { paginate: true, slurp: true })
     return pages.flat()
   } catch (error) {
+    if (isPaginationLimitError(error)) {
+      warnings.push({
+        area: "repos",
+        message: "Repository list reached the hosted pagination limit; dashboard data is partial.",
+      })
+      return flattenRepoPages(error.partialPages)
+    }
     warnings.push(toWarning("repos", error))
     return []
   }
@@ -395,6 +412,7 @@ async function getRepos(
 
 async function getRepoGraphData(
   login: string,
+  repoCount: number,
   warnings: DashboardWarning[]
 ): Promise<Map<string, GraphRepoNode>> {
   const query = `query($login:String!,$first:Int!,$after:String){
@@ -422,9 +440,11 @@ async function getRepoGraphData(
 
   const nodes: GraphRepoNode[] = []
   let after: string | undefined
+  const requestedPages = Math.max(1, Math.ceil(repoCount / GRAPHQL_REPO_PAGE_SIZE))
+  const maxPages = Math.min(requestedPages, MAX_GRAPHQL_REPO_PAGES)
 
   try {
-    for (let page = 0; page < 4; page += 1) {
+    for (let page = 0; page < maxPages; page += 1) {
       const raw = await ghGraphql<{
         data?: {
           user?: {
@@ -437,12 +457,19 @@ async function getRepoGraphData(
             }
           }
         }
-      }>(query, { login, first: "50", after })
+      }>(query, { login, first: String(GRAPHQL_REPO_PAGE_SIZE), after })
 
       const repositories = raw.data?.user?.repositories
       nodes.push(...(repositories?.nodes ?? []))
-      if (!repositories?.pageInfo?.hasNextPage || !repositories.pageInfo.endCursor) break
-      after = repositories.pageInfo.endCursor
+      const pageInfo = repositories?.pageInfo
+      if (page === maxPages - 1 && pageInfo?.hasNextPage) {
+        warnings.push({
+          area: "repo counts",
+          message: "Repository count enrichment reached the GraphQL pagination limit; some repository counts are unknown.",
+        })
+      }
+      if (!pageInfo?.hasNextPage || !pageInfo.endCursor) break
+      after = pageInfo.endCursor
     }
 
     return new Map(nodes.map((node) => [node.nameWithOwner, node]))
@@ -450,6 +477,10 @@ async function getRepoGraphData(
     warnings.push(toWarning("repo counts", error))
     return new Map(nodes.map((node) => [node.nameWithOwner, node]))
   }
+}
+
+function flattenRepoPages(pages: unknown[]): RawRepo[] {
+  return pages.flatMap((page) => Array.isArray(page) ? page as RawRepo[] : [])
 }
 
 async function getPerRepoLatestDetails(
@@ -606,18 +637,39 @@ async function getWorkflowRuns(
   repos: RepoSummary[],
   warnings: DashboardWarning[]
 ): Promise<WorkflowRunSummary[]> {
-  const results = await mapLimit(repos, 5, async (repo) => {
+  const results = await mapLimit(repos, 5, async (repo): Promise<WorkflowRunFetchResult> => {
     try {
       const raw = await ghJson<{ workflow_runs?: RawWorkflowRun[] }>(
         `/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/actions/runs?per_page=3`
       )
-      return (raw.workflow_runs ?? []).map((run) => toWorkflowRunSummary(repo.fullName, run))
-    } catch {
-      return []
+      return {
+        repo: repo.fullName,
+        runs: (raw.workflow_runs ?? []).map((run) => toWorkflowRunSummary(repo.fullName, run)),
+      }
+    } catch (error) {
+      return {
+        repo: repo.fullName,
+        runs: [],
+        error: error ?? "Workflow run request failed.",
+      }
     }
   })
 
-  const runs = results.flat()
+  const failedResults = results.filter((result) => result.error !== undefined)
+  const runs = results.flatMap((result) => result.runs)
+
+  if (failedResults.length > 0) {
+    const repoNames = failedResults.slice(0, 3).map((result) => result.repo).join(", ")
+    const hiddenCount = failedResults.length - 3
+    const hiddenSuffix = hiddenCount > 0 ? `, and ${hiddenCount} more` : ""
+    const repositoryLabel = repos.length === 1 ? "repository" : "repositories"
+
+    warnings.push({
+      area: "ci",
+      message: `Workflow runs could not be loaded for ${failedResults.length} of ${repos.length} scanned ${repositoryLabel}: ${repoNames}${hiddenSuffix}.`,
+    })
+  }
+
   if (runs.length === 0 && repos.length > 0) {
     warnings.push({
       area: "ci",
@@ -776,7 +828,13 @@ function createUnavailableBillingSummary(year: number, month: number, message: s
   }
 }
 
-function toRepoSummary(repo: RawRepo, graph?: GraphRepoNode): RepoSummary {
+function toRepoSummary(
+  repo: RawRepo,
+  graph?: GraphRepoNode,
+  options: { useRestIssueFallback?: boolean } = {}
+): RepoSummary {
+  const useRestIssueFallback = options.useRestIssueFallback ?? true
+
   return {
     id: repo.id,
     name: repo.name,
@@ -795,7 +853,7 @@ function toRepoSummary(repo: RawRepo, graph?: GraphRepoNode): RepoSummary {
     defaultBranch: repo.default_branch ?? null,
     pushedAt: repo.pushed_at,
     updatedAt: repo.updated_at,
-    openIssues: graph?.issues?.totalCount ?? repo.open_issues_count,
+    openIssues: graph?.issues?.totalCount ?? (useRestIssueFallback ? repo.open_issues_count : null),
     openPullRequests: graph?.pullRequests?.totalCount ?? null,
     checkState: graph?.defaultBranchRef?.target?.statusCheckRollup?.state ?? null,
     latestCommit: null,
