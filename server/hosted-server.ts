@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto"
 import type { IncomingMessage, ServerResponse } from "node:http"
-import { extname, join, normalize } from "node:path"
+import { extname, join, normalize, sep } from "node:path"
 
 import {
   openSession,
@@ -21,6 +21,20 @@ export const STATE_COOKIE = "gcc_oauth_state"
 export const SESSION_COOKIE_MAX_AGE = 30 * 24 * 60 * 60
 
 const revokedSessionIds = new Map<string, number>()
+const MAX_REVOKED_SESSION_IDS = 10_000
+
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: https://avatars.githubusercontent.com",
+  "connect-src 'self'",
+  "font-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join("; ")
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -59,6 +73,7 @@ export type HostedServerDependencies = {
   distDir: string
   sessionKey: Buffer
   secureCookies: boolean
+  trustProxy?: boolean
   exchangeOAuthCode(options: {
     clientId: string
     clientSecret: string
@@ -81,6 +96,10 @@ export type HostedServerDependencies = {
 export function revokeSessionId(id: string, expiresAt: number) {
   pruneExpiredRevocations()
   if (expiresAt <= Date.now()) return
+  if (!revokedSessionIds.has(id) && revokedSessionIds.size >= MAX_REVOKED_SESSION_IDS) {
+    const oldest = revokedSessionIds.keys().next().value
+    if (oldest !== undefined) revokedSessionIds.delete(oldest)
+  }
   revokedSessionIds.set(id, expiresAt)
 }
 
@@ -111,8 +130,10 @@ async function handleRequest(
   res: ServerResponse
 ) {
   const url = new URL(req.url ?? "/", baseUrl)
+  applySecurityHeaders(res, dependencies.secureCookies)
 
   if (req.method !== "GET" && req.method !== "HEAD") {
+    res.setHeader("Allow", "GET, HEAD")
     sendJson(res, 405, { message: "Method not allowed." })
     return
   }
@@ -135,7 +156,7 @@ function handleLogin(
   req: IncomingMessage,
   res: ServerResponse
 ) {
-  const limit = dependencies.rateLimiters.auth.check(`auth:${remoteAddressBucket(req)}`)
+  const limit = dependencies.rateLimiters.auth.check(`auth:${remoteAddressBucket(req, dependencies.trustProxy ?? false)}`)
   if (!limit.allowed) {
     sendRateLimit(res, limit)
     return
@@ -164,7 +185,7 @@ async function handleCallback(
   res: ServerResponse,
   url: URL
 ) {
-  const limit = dependencies.rateLimiters.auth.check(`auth:${remoteAddressBucket(req)}`)
+  const limit = dependencies.rateLimiters.auth.check(`auth:${remoteAddressBucket(req, dependencies.trustProxy ?? false)}`)
   if (!limit.allowed) {
     sendRateLimit(res, limit)
     return
@@ -210,6 +231,14 @@ async function handleLogout(
   req: IncomingMessage,
   res: ServerResponse
 ) {
+  // Logout revokes the GitHub OAuth token, so block cross-site GET navigations
+  // (cookies are SameSite=Lax and still sent on top-level links).
+  const fetchSite = req.headers["sec-fetch-site"]
+  if (typeof fetchSite === "string" && fetchSite !== "same-origin" && fetchSite !== "none") {
+    sendJson(res, 403, { message: "Logout must be initiated from the dashboard." })
+    return
+  }
+
   const cookies = parseCookies(req.headers.cookie)
   const session = cookies[SESSION_COOKIE] ? openSession(cookies[SESSION_COOKIE], dependencies.sessionKey) : null
 
@@ -280,12 +309,23 @@ async function handleDashboard(
       sendExpiredSession(dependencies, res)
       return
     }
-    const message = error instanceof Error ? error.message : "Dashboard request failed."
-    sendJson(res, 500, { message })
+    dependencies.logger.error("Dashboard request failed:", error)
+    sendJson(res, 500, { message: "Dashboard request failed. Try again shortly." })
   }
 }
 
-function remoteAddressBucket(req: IncomingMessage) {
+function remoteAddressBucket(req: IncomingMessage, trustProxy: boolean) {
+  if (trustProxy) {
+    const forwarded = req.headers["x-forwarded-for"]
+    const header = Array.isArray(forwarded) ? forwarded[0] : forwarded
+    if (header) {
+      // The last entry is the address the trusted proxy saw; earlier entries
+      // are client-supplied and spoofable.
+      const hops = header.split(",").map((part) => part.trim()).filter(Boolean)
+      const clientAddress = hops[hops.length - 1]
+      if (clientAddress) return clientAddress
+    }
+  }
   return req.socket.remoteAddress?.trim() || "unknown"
 }
 
@@ -324,7 +364,7 @@ async function serveStatic(dependencies: HostedServerDependencies, res: ServerRe
   const requested = pathname === "/" ? "/index.html" : pathname
   const safePath = normalize(requested).replace(/^(\.\.[/\\])+/, "")
   let filePath = join(dependencies.distDir, safePath)
-  if (!filePath.startsWith(dependencies.distDir)) {
+  if (filePath !== dependencies.distDir && !filePath.startsWith(dependencies.distDir + sep)) {
     sendJson(res, 403, { message: "Forbidden." })
     return
   }
@@ -349,6 +389,16 @@ async function serveStatic(dependencies: HostedServerDependencies, res: ServerRe
     res.end(body)
   } catch {
     sendJson(res, 404, { message: "Not found. Run `npm run build` before starting the server." })
+  }
+}
+
+function applySecurityHeaders(res: ServerResponse, secureCookies: boolean) {
+  res.setHeader("X-Content-Type-Options", "nosniff")
+  res.setHeader("X-Frame-Options", "DENY")
+  res.setHeader("Referrer-Policy", "no-referrer")
+  res.setHeader("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+  if (secureCookies) {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
   }
 }
 

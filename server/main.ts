@@ -14,6 +14,7 @@ const CLIENT_ID = process.env.GITHUB_CLIENT_ID || ""
 const CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || ""
 const SESSION_SECRET = process.env.SESSION_SECRET || ""
 const DIST_DIR = process.env.GCC_DIST_DIR || join(process.cwd(), "dist")
+const TRUST_PROXY = process.env.TRUST_PROXY === "1" || process.env.TRUST_PROXY === "true"
 
 for (const [name, value] of [
   ["GITHUB_CLIENT_ID", CLIENT_ID],
@@ -40,6 +41,7 @@ const server = createServer(createHostedRequestHandler({
   distDir: DIST_DIR,
   sessionKey,
   secureCookies,
+  trustProxy: TRUST_PROXY,
   exchangeOAuthCode,
   fetchViewerLogin,
   revokeOAuthToken,

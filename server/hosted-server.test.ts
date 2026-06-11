@@ -47,6 +47,8 @@ type FixtureOptions = {
   revokeOAuthToken?: HostedServerDependencies["revokeOAuthToken"]
   readFile?: HostedServerDependencies["readFile"]
   stat?: HostedServerDependencies["stat"]
+  secureCookies?: boolean
+  trustProxy?: boolean
 }
 
 type TestResponse = {
@@ -90,7 +92,8 @@ async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
     clientSecret: "client-secret",
     distDir: DIST_DIR,
     sessionKey,
-    secureCookies: false,
+    secureCookies: options.secureCookies ?? false,
+    trustProxy: options.trustProxy ?? false,
     exchangeOAuthCode: async (exchangeOptions) => {
       calls.exchanges.push(exchangeOptions)
       return "gho_token"
@@ -635,7 +638,117 @@ describe("hosted request handler", () => {
       const response = await fixture.request("/healthz", { method: "POST" })
 
       expect(response.status).toBe(405)
+      expect(header(response, "allow")).toBe("GET, HEAD")
       expect(JSON.parse(response.body)).toEqual({ message: "Method not allowed." })
     })
+  })
+
+  it("sets security headers on every response", async () => {
+    await withFixture(async (fixture) => {
+      for (const path of ["/", "/healthz", "/api/dashboard"]) {
+        const response = await fixture.request(path)
+        expect(header(response, "x-content-type-options")).toBe("nosniff")
+        expect(header(response, "x-frame-options")).toBe("DENY")
+        expect(header(response, "referrer-policy")).toBe("no-referrer")
+        expect(header(response, "content-security-policy")).toContain("default-src 'self'")
+        expect(header(response, "strict-transport-security")).toBeUndefined()
+      }
+    })
+  })
+
+  it("sends HSTS only on secure deployments", async () => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/healthz")
+      expect(header(response, "strict-transport-security")).toContain("max-age=31536000")
+    }, { secureCookies: true })
+  })
+
+  it("blocks cross-site logout navigations without revoking the token", async () => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/auth/logout", {
+        headers: {
+          Cookie: sessionCookieHeader(fixture.sessionKey),
+          "Sec-Fetch-Site": "cross-site",
+        },
+      })
+
+      expect(response.status).toBe(403)
+      expect(fixture.calls.revocations).toHaveLength(0)
+      expect(response.setCookies).toHaveLength(0)
+    })
+  })
+
+  it("allows same-origin and direct logout navigations", async () => {
+    await withFixture(async (fixture) => {
+      const sameOrigin = await fixture.request("/auth/logout", {
+        headers: { "Sec-Fetch-Site": "same-origin" },
+      })
+      expect(sameOrigin.status).toBe(302)
+
+      const direct = await fixture.request("/auth/logout", {
+        headers: { "Sec-Fetch-Site": "none" },
+      })
+      expect(direct.status).toBe(302)
+    })
+  })
+
+  it("does not return internal error details on dashboard failures", async () => {
+    const loadDashboard: HostedServerDependencies["loadDashboard"] = async () => {
+      throw new Error("GitHub API returned 500 for /repos/internal/secret-repo.")
+    }
+
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/api/dashboard", {
+        headers: { Cookie: sessionCookieHeader(fixture.sessionKey) },
+      })
+
+      expect(response.status).toBe(500)
+      expect(response.body).not.toContain("secret-repo")
+      expect(JSON.parse(response.body)).toEqual({ message: "Dashboard request failed. Try again shortly." })
+      expect(fixture.logger.error).toHaveBeenCalled()
+    }, { loadDashboard })
+  })
+
+  it("buckets auth rate limits by forwarded client address when proxy is trusted", async () => {
+    const rateLimiters = {
+      ...createHostedRateLimiters(),
+      auth: createRateLimiter({ limit: 1, windowMs: 60_000 }),
+    }
+
+    await withFixture(async (fixture) => {
+      const first = await fixture.request("/auth/login", {
+        headers: { "X-Forwarded-For": "203.0.113.1" },
+      })
+      expect(first.status).toBe(302)
+
+      const sameClient = await fixture.request("/auth/login", {
+        headers: { "X-Forwarded-For": "203.0.113.1" },
+      })
+      expect(sameClient.status).toBe(429)
+
+      const otherClient = await fixture.request("/auth/login", {
+        headers: { "X-Forwarded-For": "203.0.113.2" },
+      })
+      expect(otherClient.status).toBe(302)
+    }, { rateLimiters, trustProxy: true })
+  })
+
+  it("ignores forwarded headers when the proxy is not trusted", async () => {
+    const rateLimiters = {
+      ...createHostedRateLimiters(),
+      auth: createRateLimiter({ limit: 1, windowMs: 60_000 }),
+    }
+
+    await withFixture(async (fixture) => {
+      const first = await fixture.request("/auth/login", {
+        headers: { "X-Forwarded-For": "203.0.113.1" },
+      })
+      expect(first.status).toBe(302)
+
+      const spoofed = await fixture.request("/auth/login", {
+        headers: { "X-Forwarded-For": "203.0.113.2" },
+      })
+      expect(spoofed.status).toBe(429)
+    }, { rateLimiters })
   })
 })
