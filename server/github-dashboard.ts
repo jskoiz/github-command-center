@@ -240,7 +240,9 @@ export async function getPublicGithubDashboard(
 }
 
 function publicGithubToken(): string | null {
-  return process.env.GITHUB_PUBLIC_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN || null
+  // Only the explicit opt-in token; falling back to GITHUB_TOKEN/GH_TOKEN
+  // would spend an operator's personal token on anonymous visitors.
+  return process.env.GITHUB_PUBLIC_TOKEN || null
 }
 
 function normalizeGithubLogin(username: string): string {
@@ -342,7 +344,10 @@ async function loadGithubDashboard({
   const scanRepos = enrichedRepos.slice(0, scanLimit)
 
   const [repoDetails, runs, pullRequests, issues, billing] = await Promise.all([
-    getPerRepoLatestDetails(enrichedRepos, warnings, now),
+    // Enrichment stays within the scan window: per-repo detail fetches over the
+    // full repo list (up to 1000) would let one request fan out thousands of
+    // upstream GitHub calls.
+    getPerRepoLatestDetails(scanRepos, warnings, now),
     getWorkflowRuns(scanRepos, warnings),
     getSearchItems(`is:pr involves:${viewer.login} archived:false`, true, warnings),
     getSearchItems(`is:issue involves:${viewer.login} archived:false`, false, warnings),

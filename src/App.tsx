@@ -49,7 +49,7 @@ import {
 import { loadDismissedRuns, saveDismissedRuns } from "@/lib/dismissed-runs"
 import { loadHiddenRepos, saveHiddenRepos } from "@/lib/hidden-repos"
 import { formatRelative, setViewerLogin } from "@/lib/format"
-import { classifyGithubStatus } from "@/lib/github-status"
+import { repoCiRollup } from "@/lib/github-status"
 import { cn } from "@/lib/utils"
 import type { DashboardPayload, RepoSummary } from "@/types/github"
 
@@ -61,21 +61,7 @@ const DASHBOARD_PREVIEW_HEIGHT = 620
 type Theme = "light" | "dark"
 type AuthMode = "local" | "oauth" | "public" | "demo"
 export type RepoScope = "active" | "all" | "hidden"
-type RepoSortKey =
-  | "fullName"
-  | "language"
-  | "visibility"
-  | "openPullRequests"
-  | "openIssues"
-  | "checkState"
-  | "pushedAt"
-  | "updatedAt"
-  | "stars"
-  | "forks"
-  | "sizeKb"
-  | "defaultBranch"
-  | "lastCommitAt"
-  | "lastPullRequestAt"
+type RepoSortKey = "pushedAt" | "openPullRequests" | "openIssues"
 type RepoSort = {
   key: RepoSortKey
   direction: "asc" | "desc"
@@ -139,8 +125,8 @@ function App() {
   const [repoScope, setRepoScope] = useState<RepoScope>("active")
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme())
-  const [dismissedRunIds, setDismissedRunIds] = useState<Set<number>>(() => loadDismissedRuns())
-  const [hiddenRepoIds, setHiddenRepoIds] = useState<Set<number>>(() => loadHiddenRepos())
+  const [dismissedRunIds, setDismissedRunIds] = useState<Set<number>>(() => loadDismissedRuns(dashboardSourceKey))
+  const [hiddenRepoIds, setHiddenRepoIds] = useState<Set<number>>(() => loadHiddenRepos(dashboardSourceKey))
   const [authMode, setAuthMode] = useState<AuthMode>(() => demoMode ? "demo" : publicUsername ? "public" : "local")
   const [needsLogin, setNeedsLogin] = useState(false)
   const searchInputRef = useRef<HTMLInputElement>(null)
@@ -150,12 +136,12 @@ function App() {
   setViewerLogin(data?.viewer.login ?? null)
 
   useEffect(() => {
-    saveDismissedRuns(dismissedRunIds)
-  }, [dismissedRunIds])
+    saveDismissedRuns(dashboardSourceKey, dismissedRunIds)
+  }, [dashboardSourceKey, dismissedRunIds])
 
   useEffect(() => {
-    saveHiddenRepos(hiddenRepoIds)
-  }, [hiddenRepoIds])
+    saveHiddenRepos(dashboardSourceKey, hiddenRepoIds)
+  }, [dashboardSourceKey, hiddenRepoIds])
 
   const handleDismissRun = useCallback((id: number) => {
     setDismissedRunIds((current) => new Set(current).add(id))
@@ -367,7 +353,7 @@ function App() {
       })
       .filter((repo) => visibility === "all" || repo.visibility === visibility)
       .filter((repo) => language === "all" || repo.language === language)
-      .filter((repo) => ciState === "all" || getRepoCiState(repo) === ciState)
+      .filter((repo) => ciState === "all" || repoCiRollup(repo) === ciState)
       .sort((a, b) => compareRepos(a, b, sort))
   }, [ciState, data, hiddenRepoIds, language, query, repoScope, sort, visibility, visibleRepos])
 
@@ -396,6 +382,12 @@ function App() {
   }, [])
 
   const handleToggleRepoHidden = useCallback((id: number) => {
+    if (!hiddenRepoIds.has(id)) {
+      // Hiding the repo the feeds are scoped to would leave them empty with
+      // no visible chip owner, so drop the selection along with the repo.
+      const hidingName = data?.repos.find((repo) => repo.id === id)?.fullName
+      if (hidingName) setSelectedRepo((current) => (current === hidingName ? null : current))
+    }
     setHiddenRepoIds((current) => {
       const next = new Set(current)
       if (next.has(id)) {
@@ -405,7 +397,7 @@ function App() {
       }
       return next
     })
-  }, [])
+  }, [data, hiddenRepoIds])
 
   const showAttentionScope = useCallback(() => {
     setQuery("")
@@ -467,10 +459,8 @@ function App() {
               <>
                 <AttentionStrip
                   repos={visibleRepos}
-                  runs={visibleRuns}
                   billing={data.billing}
                   detailLevel={data.detailLevel}
-                  dismissedRunIds={dismissedRunIds}
                   onShowFailing={handleShowFailing}
                   onShowPullRequests={handleShowPullRequests}
                   onShowIssues={handleShowIssues}
@@ -481,7 +471,7 @@ function App() {
                     scope={repoScope}
                     activeCount={activeCount}
                     totalCount={visibleRepos.length}
-                    hiddenCount={hiddenRepoIds.size}
+                    hiddenCount={hiddenRepoNames.size}
                     commits={visibleActivity.commits}
                     pullRequests={visibleActivity.pullRequests}
                     issues={visibleActivity.issues}
@@ -552,7 +542,7 @@ function Header({
     <header className="top-0 z-20 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/85 md:sticky">
       <div className="flex min-h-14 flex-col gap-2 px-2 py-2 sm:px-3 lg:h-14 lg:flex-row lg:items-center lg:justify-between lg:py-0">
         <div className="flex min-w-0 items-center gap-2.5">
-          <a href="#repos" className="flex shrink-0 items-center gap-2" aria-label="GitHub Home">
+          <a href="#repos" className="flex shrink-0 items-center gap-2" aria-label="Jump to repositories">
             <SiGithub className="size-7 text-foreground" aria-hidden="true" />
             <span className="text-lg font-semibold leading-none">{data?.viewer.login ?? "Command Center"}</span>
           </a>
@@ -746,9 +736,9 @@ function Homepage({
     <div className="min-h-screen bg-background text-foreground [text-wrap:pretty]">
       <div className="mx-auto max-w-[1080px] px-6 min-[520px]:px-10">
         <header className="flex items-center pt-9">
-          <a href="/" className="flex items-center gap-[9px] text-[17px] leading-none font-semibold" aria-label="okgithub home">
+          <a href="/" className="flex items-center gap-[9px] text-[17px] leading-none font-semibold" aria-label="GitHub Command Center home">
             <SiGithub className="size-7" aria-hidden="true" />
-            okgithub
+            GitHub Command Center
           </a>
           <div className="flex-1" />
           <button
@@ -827,7 +817,7 @@ function Homepage({
 
           <section className="mt-[60px] grid grid-cols-1 gap-9 min-[860px]:grid-cols-3">
             <HomepageFeature title="Public view, no login">
-              Any profile is a dashboard: <code className="rounded-[5px] bg-muted px-1.5 py-0.5 font-mono text-[12px] leading-none font-medium text-foreground">okgithub.com/username</code> shows public PRs, issues, commits, CI, and repos instantly.
+              Any profile is a dashboard: <code className="rounded-[5px] bg-muted px-1.5 py-0.5 font-mono text-[12px] leading-none font-medium text-foreground">/username</code> shows public PRs, issues, commits, CI, and repos instantly.
             </HomepageFeature>
             <HomepageFeature title="Sign in for everything">
               GitHub OAuth unlocks private repos, workflow runs, Actions billing — everything your token can read.
@@ -939,10 +929,6 @@ function ErrorPanel({
   )
 }
 
-function getRepoCiState(repo: RepoSummary): string {
-  return classifyGithubStatus(repo.latestRun?.conclusion ?? repo.latestRun?.status ?? repo.checkState).rollup
-}
-
 const ACTIVE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 
 function isActiveRepo(repo: RepoSummary): boolean {
@@ -955,36 +941,16 @@ function compareRepos(
   b: RepoSummary,
   sort: RepoSort
 ): number {
-  const aValue = getSortValue(a, sort.key)
-  const bValue = getSortValue(b, sort.key)
   const direction = sort.direction === "asc" ? 1 : -1
-
-  if (typeof aValue === "number" && typeof bValue === "number") {
-    return (aValue - bValue) * direction
-  }
-
-  return String(aValue).localeCompare(String(bValue)) * direction
+  return (getSortValue(a, sort.key) - getSortValue(b, sort.key)) * direction
 }
 
-function getSortValue(
-  repo: RepoSummary,
-  key: RepoSortKey
-): string | number {
-  if (key === "pushedAt") return repo.pushedAt ? Date.parse(repo.pushedAt) : 0
-  if (key === "updatedAt") return repo.updatedAt ? Date.parse(repo.updatedAt) : 0
-  if (key === "lastCommitAt") return dateSortValue(repo.latestCommit?.date)
-  if (key === "lastPullRequestAt") return dateSortValue(repo.latestPullRequest?.updatedAt)
+function getSortValue(repo: RepoSummary, key: RepoSortKey): number {
+  // Unknown counts (-1) and missing dates (0) sink below real values on the
+  // default descending sorts.
   if (key === "openPullRequests") return repo.openPullRequests ?? -1
   if (key === "openIssues") return repo.openIssues ?? -1
-  if (key === "stars") return repo.stars
-  if (key === "forks") return repo.forks
-  if (key === "sizeKb") return repo.sizeKb
-  if (key === "checkState") return getRepoCiState(repo)
-  return repo[key] ?? ""
-}
-
-function dateSortValue(value: string | null | undefined) {
-  return value ? Date.parse(value) : 0
+  return repo.pushedAt ? Date.parse(repo.pushedAt) : 0
 }
 
 function isAbortError(error: unknown) {
