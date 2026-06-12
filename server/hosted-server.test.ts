@@ -800,9 +800,10 @@ describe("hosted request handler", () => {
       for (const path of ["/", "/healthz", "/api/dashboard"]) {
         const response = await fixture.request(path)
         expect(header(response, "x-content-type-options")).toBe("nosniff")
-        expect(header(response, "x-frame-options")).toBe("DENY")
+        expect(header(response, "x-frame-options")).toBe("SAMEORIGIN")
         expect(header(response, "referrer-policy")).toBe("no-referrer")
         expect(header(response, "content-security-policy")).toContain("default-src 'self'")
+        expect(header(response, "content-security-policy")).toContain("frame-ancestors 'self'")
         expect(header(response, "strict-transport-security")).toBeUndefined()
       }
     })

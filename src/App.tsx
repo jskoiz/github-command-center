@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react"
 import {
   CircleDotIcon,
   LogOutIcon,
@@ -54,6 +54,10 @@ import { cn } from "@/lib/utils"
 import type { DashboardPayload, RepoSummary } from "@/types/github"
 
 const THEME_STORAGE_KEY = "github-command-center:theme"
+const REPO_URL = "https://github.com/jskoiz/github-command-center"
+const X_URL = "https://x.com/jskoiz"
+const DASHBOARD_PREVIEW_WIDTH = 1240
+const DASHBOARD_PREVIEW_HEIGHT = 620
 type Theme = "light" | "dark"
 type AuthMode = "local" | "oauth" | "public" | "demo"
 export type RepoScope = "active" | "all" | "hidden"
@@ -88,6 +92,8 @@ function isDemoPath(): boolean {
 
 function getInitialTheme(): Theme {
   if (typeof window === "undefined") return "light"
+  const themeParam = new URLSearchParams(window.location.search).get("theme")
+  if (themeParam === "light" || themeParam === "dark") return themeParam
   try {
     const stored = window.localStorage.getItem(THEME_STORAGE_KEY)
     if (stored === "light" || stored === "dark") return stored
@@ -417,7 +423,7 @@ function App() {
   }, [showAttentionScope])
 
   if (!shouldLoadDashboard || needsLogin) {
-    return <LandingScreen />
+    return <Homepage theme={theme} onThemeToggle={toggleTheme} />
   }
 
   if (loading) {
@@ -713,7 +719,13 @@ function HeaderFilters({
   )
 }
 
-function LandingScreen() {
+function Homepage({
+  theme,
+  onThemeToggle,
+}: {
+  theme: Theme
+  onThemeToggle: () => void
+}) {
   const [username, setUsername] = useState("")
   const normalizedUsername = username.trim()
   const publicPath = GITHUB_LOGIN_PATTERN.test(normalizedUsername)
@@ -721,53 +733,173 @@ function LandingScreen() {
     : "/"
 
   return (
-    <div className="grid min-h-screen place-items-center bg-background px-5 py-10 text-foreground">
-      <div className="flex w-full max-w-md flex-col gap-7">
-        <a href="/" className="flex w-fit items-center gap-2 text-lg font-semibold" aria-label="GitHub Command Center home">
-          <SiGithub className="size-8" aria-hidden="true" />
-          GitHub Command Center
-        </a>
-        <div className="space-y-3">
-          <h1 className="text-3xl font-semibold leading-tight sm:text-4xl">
-            An actual usable GitHub homepage.
-          </h1>
-          <p className="text-base leading-7 text-muted-foreground">
-            Public view is instant: PRs, issues, commits, CI, and repos. Enter a username. No login required.
-          </p>
-        </div>
-        <form action={publicPath} className="flex flex-col gap-2 sm:flex-row">
-          <Input
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
-            placeholder="jskoiz"
-            aria-label="GitHub username"
-            autoCapitalize="none"
-            autoCorrect="off"
-            spellCheck={false}
-            className="h-11 bg-card text-base sm:flex-1"
-          />
-          <Button type="submit" size="lg" disabled={!GITHUB_LOGIN_PATTERN.test(normalizedUsername)}>
-            Open public view
-          </Button>
-        </form>
-        <div className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center">
-          <Button variant="secondary" size="lg" className="w-full sm:w-fit" asChild>
-            <a href="/demo">View demo</a>
-          </Button>
-          <span>Sample data, no GitHub calls.</span>
-        </div>
-        <div className="space-y-3 border-t pt-5">
-          <p className="text-sm leading-6 text-muted-foreground">
-            Want the full version? Sign in for private repos, workflow runs, billing, and everything your token can read.
-          </p>
-          <Button variant="outline" size="lg" className="w-full sm:w-fit" asChild>
-            <a href="/auth/login">
-              <SiGithub data-icon="inline-start" aria-hidden="true" />
-              Sign in for full view
-            </a>
-          </Button>
-        </div>
+    <div className="min-h-screen bg-background text-foreground [text-wrap:pretty]">
+      <div className="mx-auto max-w-[1080px] px-6 min-[520px]:px-10">
+        <header className="flex items-center pt-9">
+          <a href="/" className="flex items-center gap-[9px] text-[17px] leading-none font-semibold" aria-label="GitHub Command Center home">
+            <SiGithub className="size-7" aria-hidden="true" />
+            GitHub Command Center
+          </a>
+          <div className="flex-1" />
+          <button
+            type="button"
+            onClick={onThemeToggle}
+            title="Toggle theme"
+            aria-label="Toggle theme"
+            className="inline-flex size-[34px] items-center justify-center rounded-[7px] border border-border bg-card text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none"
+          >
+            {theme === "dark" ? <SunIcon className="size-[15px]" aria-hidden="true" /> : <MoonIcon className="size-[15px]" aria-hidden="true" />}
+          </button>
+        </header>
+
+        <main>
+          <section className="mx-auto max-w-[620px] pt-16 text-center">
+            <h1 className="m-0 text-[44px] leading-[1.15] font-semibold tracking-[-0.02em]">
+              An actual usable GitHub homepage.
+            </h1>
+            <p className="mt-4 text-[17px] leading-[1.6] font-normal text-muted-foreground">
+              One dense view of everything you check GitHub for — PRs, issues, commits, CI, and Actions billing across all your repos. Enter a username. No login required.
+            </p>
+
+            <div className="mx-auto mt-7 max-w-[460px]">
+              <form
+                action={publicPath}
+                className="flex flex-col gap-2.5 min-[520px]:flex-row"
+                onSubmit={(event) => {
+                  if (!normalizedUsername || !GITHUB_LOGIN_PATTERN.test(normalizedUsername)) {
+                    event.preventDefault()
+                  }
+                }}
+              >
+                <input
+                  value={username}
+                  onChange={(event) => setUsername(event.target.value)}
+                  placeholder="github username"
+                  aria-label="GitHub username"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  className="h-[42px] min-w-0 flex-1 rounded-lg border border-border bg-card px-3.5 text-[15px] leading-none font-normal text-foreground outline-none transition-colors duration-150 placeholder:text-muted-foreground placeholder:opacity-70 focus:border-muted-foreground"
+                />
+                <button
+                  type="submit"
+                  className="inline-flex h-[42px] items-center justify-center rounded-lg bg-primary px-[18px] text-[14px] leading-none font-semibold whitespace-nowrap text-primary-foreground transition-opacity duration-150 hover:opacity-85 focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none"
+                >
+                  Open public view
+                </button>
+              </form>
+              <p className="mt-3 text-[13px] leading-[1.5] font-normal text-muted-foreground">
+                Or{" "}
+                <a href="/auth/login" className="font-medium underline underline-offset-3">
+                  sign in with GitHub
+                </a>{" "}
+                for private repos, workflow runs, and billing.
+              </p>
+            </div>
+          </section>
+
+          <section className="mt-14" aria-label="Demo dashboard">
+            <div className="mb-2.5 flex items-center gap-2.5 font-mono text-[12.5px] leading-none font-medium text-muted-foreground">
+              <a href="/demo" className="rounded-md bg-muted px-2 py-1 font-mono text-[12px] leading-none font-semibold text-foreground hover:underline">
+                /demo
+              </a>
+              <span>live with sample data, no GitHub calls — click tabs and repos</span>
+            </div>
+            <ScaledDemoFrame>
+              <iframe
+                src={`/demo?theme=${theme}`}
+                title="Live demo dashboard"
+                className="block border-0 bg-background"
+                style={{ width: DASHBOARD_PREVIEW_WIDTH, height: DASHBOARD_PREVIEW_HEIGHT }}
+              />
+            </ScaledDemoFrame>
+          </section>
+
+          <section className="mt-[60px] grid grid-cols-1 gap-9 min-[860px]:grid-cols-3">
+            <HomepageFeature title="Public view, no login">
+              Any profile is a dashboard: <code className="rounded-[5px] bg-muted px-1.5 py-0.5 font-mono text-[12px] leading-none font-medium text-foreground">/username</code> shows public PRs, issues, commits, CI, and repos instantly.
+            </HomepageFeature>
+            <HomepageFeature title="Sign in for everything">
+              GitHub OAuth unlocks private repos, workflow runs, Actions billing — everything your token can read.
+            </HomepageFeature>
+            <HomepageFeature title="Self-host or run local">
+              Open source. Run it on your machine against the <code className="rounded-[5px] bg-muted px-1.5 py-0.5 font-mono text-[12px] leading-none font-medium text-foreground">gh</code> CLI, or deploy the hosted server anywhere a container runs.
+            </HomepageFeature>
+          </section>
+        </main>
+
+        <footer className="mt-[60px] flex flex-wrap items-center gap-x-[22px] gap-y-3 border-t border-border py-[26px] pb-[34px] text-[13px] leading-none font-normal text-muted-foreground">
+          <a href={REPO_URL} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 font-medium text-foreground hover:underline">
+            <SiGithub className="size-[15px]" aria-hidden="true" />
+            jskoiz/github-command-center
+          </a>
+          <span>MIT</span>
+          <span className="hidden flex-1 min-[620px]:block" />
+          <span>
+            Questions?{" "}
+            <a href={X_URL} target="_blank" rel="noreferrer" className="font-medium text-foreground hover:underline">
+              @jskoiz
+            </a>{" "}
+            on X
+          </span>
+        </footer>
       </div>
+    </div>
+  )
+}
+
+function HomepageFeature({
+  title,
+  children,
+}: {
+  title: string
+  children: ReactNode
+}) {
+  return (
+    <div>
+      <h3 className="mb-1.5 text-[15px] leading-[1.3] font-semibold">{title}</h3>
+      <p className="text-[13.5px] leading-[1.55] font-normal text-muted-foreground">{children}</p>
+    </div>
+  )
+}
+
+function ScaledDemoFrame({ children }: { children: ReactNode }) {
+  const frameRef = useRef<HTMLDivElement>(null)
+  const [scale, setScale] = useState(1)
+
+  useEffect(() => {
+    const frame = frameRef.current
+    if (!frame) return
+
+    const updateScale = () => {
+      const width = frame.clientWidth || DASHBOARD_PREVIEW_WIDTH
+      setScale(width / DASHBOARD_PREVIEW_WIDTH)
+    }
+
+    updateScale()
+
+    if (typeof ResizeObserver === "undefined") return
+
+    const observer = new ResizeObserver(updateScale)
+    observer.observe(frame)
+    return () => observer.disconnect()
+  }, [])
+
+  const height = Math.round(DASHBOARD_PREVIEW_HEIGHT * scale)
+  const previewStyle: CSSProperties = {
+    width: DASHBOARD_PREVIEW_WIDTH,
+    height: DASHBOARD_PREVIEW_HEIGHT,
+    transform: `scale(${scale})`,
+    transformOrigin: "top left",
+  }
+
+  return (
+    <div
+      ref={frameRef}
+      className="overflow-hidden rounded-xl border border-border bg-background shadow-[0_1px_2px_oklch(0_0_0_/_5%),0_12px_32px_-16px_oklch(0_0_0_/_14%)]"
+      style={{ height }}
+    >
+      <div style={previewStyle}>{children}</div>
     </div>
   )
 }
