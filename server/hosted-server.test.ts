@@ -247,6 +247,14 @@ function testRateLimiters(
   }
 }
 
+function rateLimitPayload(retryAfterSeconds = 60) {
+  return {
+    code: "app_rate_limit",
+    message: RATE_LIMIT_MESSAGE,
+    retryAfterSeconds,
+  }
+}
+
 describe("hosted session revocations", () => {
   it("records active revoked session ids", () => {
     const expiresAt = Date.now() + 60_000
@@ -398,7 +406,7 @@ describe("hosted request handler", () => {
       expect(blocked.status).toBe(429)
       expect(header(blocked, "retry-after")).toBe("60")
       expect(header(blocked, "location")).toBeUndefined()
-      expect(JSON.parse(blocked.body)).toEqual({ message: RATE_LIMIT_MESSAGE })
+      expect(JSON.parse(blocked.body)).toEqual(rateLimitPayload())
     }, { rateLimiters })
   })
 
@@ -455,7 +463,7 @@ describe("hosted request handler", () => {
       expect(allowed.status).toBe(302)
       expect(blocked.status).toBe(429)
       expect(header(blocked, "retry-after")).toBe("60")
-      expect(JSON.parse(blocked.body)).toEqual({ message: RATE_LIMIT_MESSAGE })
+      expect(JSON.parse(blocked.body)).toEqual(rateLimitPayload())
       expect(fixture.calls.exchanges).toHaveLength(1)
       expect(fixture.calls.exchanges[0]?.code).toBe("first")
     }, { rateLimiters })
@@ -586,10 +594,59 @@ describe("hosted request handler", () => {
 
       expect(allowed.status).toBe(200)
       expect(blocked.status).toBe(429)
+      expect(header(blocked, "x-gcc-auth")).toBe("public")
       expect(header(blocked, "retry-after")).toBe("60")
-      expect(JSON.parse(blocked.body)).toEqual({ message: RATE_LIMIT_MESSAGE })
+      expect(JSON.parse(blocked.body)).toEqual(rateLimitPayload())
       expect(fixture.calls.publicDashboards).toHaveLength(1)
     }, { rateLimiters })
+  })
+
+  it("returns a GitHub quota recovery payload for public dashboards", async () => {
+    const loadPublicDashboard: HostedServerDependencies["loadPublicDashboard"] = async () => {
+      const error = new Error("GitHub API returned 403 for /users/jskoiz. API rate limit exceeded.") as Error & {
+        code: "github_rate_limit"
+        retryAfterSeconds: number
+        retryAt: string
+        status: number
+      }
+      error.code = "github_rate_limit"
+      error.retryAfterSeconds = 120
+      error.retryAt = "2026-06-12T03:00:00.000Z"
+      error.status = 403
+      throw error
+    }
+
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/api/dashboard/jskoiz?quick=1")
+
+      expect(response.status).toBe(403)
+      expect(header(response, "x-gcc-auth")).toBe("public")
+      expect(JSON.parse(response.body)).toEqual({
+        code: "github_rate_limit",
+        message: "GitHub rate limit reached for public dashboards. Sign in with GitHub to use your own API quota, or try again later.",
+        loginUrl: "/auth/login",
+        retryAfterSeconds: 120,
+        retryAt: "2026-06-12T03:00:00.000Z",
+      })
+    }, { loadPublicDashboard })
+  })
+
+  it("does not return internal error details on public dashboard failures", async () => {
+    const loadPublicDashboard: HostedServerDependencies["loadPublicDashboard"] = async () => {
+      throw new Error("GitHub API returned 500 for /repos/internal/secret-repo.")
+    }
+
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/api/dashboard/jskoiz")
+
+      expect(response.status).toBe(500)
+      expect(header(response, "x-gcc-auth")).toBe("public")
+      expect(response.body).not.toContain("secret-repo")
+      expect(JSON.parse(response.body)).toEqual({
+        message: "Public dashboard request failed. Try again shortly.",
+      })
+      expect(fixture.logger.error).toHaveBeenCalled()
+    }, { loadPublicDashboard })
   })
 
   it("does not count unauthenticated dashboard requests against user buckets", async () => {
@@ -656,7 +713,7 @@ describe("hosted request handler", () => {
       expect(blockedQuick.status).toBe(429)
       expect(header(blockedQuick, "x-gcc-auth")).toBe("oauth")
       expect(header(blockedQuick, "retry-after")).toBe("60")
-      expect(JSON.parse(blockedQuick.body)).toEqual({ message: RATE_LIMIT_MESSAGE })
+      expect(JSON.parse(blockedQuick.body)).toEqual(rateLimitPayload())
       expect(fixture.calls.dashboards).toHaveLength(3)
       expect(fixture.calls.dashboards.map((call) => [call.quick, call.force])).toEqual([
         [true, false],
@@ -684,7 +741,7 @@ describe("hosted request handler", () => {
       expect(blocked.status).toBe(429)
       expect(header(blocked, "x-gcc-auth")).toBe("oauth")
       expect(header(blocked, "retry-after")).toBe("60")
-      expect(JSON.parse(blocked.body)).toEqual({ message: RATE_LIMIT_MESSAGE })
+      expect(JSON.parse(blocked.body)).toEqual(rateLimitPayload())
       expect(fixture.calls.dashboards).toHaveLength(1)
     }, { rateLimiters })
   })

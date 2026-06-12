@@ -1,17 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode, type RefObject } from "react"
 import {
-  CircleDotIcon,
   LogOutIcon,
   MoonIcon,
   RefreshCcwIcon,
   SearchIcon,
-  SlidersHorizontalIcon,
   SunIcon,
   XIcon,
 } from "lucide-react"
 import { SiGithub } from "react-icons/si"
 
-import { AttentionStrip } from "@/components/dashboard/AttentionStrip"
 import { FocusView } from "@/components/dashboard/FocusView"
 import { DashboardSkeleton } from "@/components/dashboard/DashboardSkeleton"
 import { OperationalRail } from "@/components/dashboard/OperationalRail"
@@ -50,7 +47,6 @@ import { loadDismissedRuns, saveDismissedRuns } from "@/lib/dismissed-runs"
 import { loadHiddenRepos, saveHiddenRepos } from "@/lib/hidden-repos"
 import { formatRelative, setViewerLogin } from "@/lib/format"
 import { classifyGithubStatus } from "@/lib/github-status"
-import { cn } from "@/lib/utils"
 import type { DashboardPayload, RepoSummary } from "@/types/github"
 
 const THEME_STORAGE_KEY = "github-command-center:theme"
@@ -58,8 +54,26 @@ const REPO_URL = "https://github.com/jskoiz/github-command-center"
 const X_URL = "https://x.com/jskoiz"
 const DASHBOARD_PREVIEW_WIDTH = 1240
 const DASHBOARD_PREVIEW_HEIGHT = 620
+const DEMO_PREVIEW_VERSION = "stripless"
 type Theme = "light" | "dark"
 type AuthMode = "local" | "oauth" | "public" | "demo"
+type DashboardErrorPayload = {
+  code?: string
+  message?: string
+  loginUrl?: string
+  retryAfterSeconds?: number
+  retryAt?: string
+}
+type DashboardErrorState = {
+  code?: string
+  title: string
+  message: string
+  loginUrl?: string
+  retryAfterSeconds?: number
+  retryAt?: string
+  stale?: boolean
+  status?: number
+}
 export type RepoScope = "active" | "all" | "hidden"
 type RepoSortKey =
   | "fullName"
@@ -81,6 +95,7 @@ type RepoSort = {
   direction: "asc" | "desc"
 }
 
+const DEFAULT_REPO_SORT: RepoSort = { key: "pushedAt", direction: "desc" }
 const RESERVED_PUBLIC_PATHS = new Set(["api", "assets", "auth", "dashboard", "demo", "healthz"])
 const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
 
@@ -102,6 +117,83 @@ function isSignedDashboardPath(): boolean {
 function isDemoPath(): boolean {
   if (typeof window === "undefined") return false
   return window.location.pathname.replace(/\/+$/, "") === "/demo"
+}
+
+class DashboardRequestError extends Error {
+  readonly status: number
+  readonly payload: DashboardErrorPayload
+
+  constructor(message: string, status: number, payload: DashboardErrorPayload) {
+    super(message)
+    this.name = "DashboardRequestError"
+    this.status = status
+    this.payload = payload
+  }
+}
+
+async function createDashboardRequestError(response: Response): Promise<DashboardRequestError> {
+  let payload: DashboardErrorPayload = {}
+  try {
+    const parsed = await response.json() as unknown
+    if (isDashboardErrorPayload(parsed)) payload = parsed
+  } catch {
+    // Non-JSON error responses still render with the HTTP status fallback.
+  }
+
+  return new DashboardRequestError(
+    payload.message || `Dashboard API returned ${response.status}`,
+    response.status,
+    payload
+  )
+}
+
+function toDashboardErrorState(error: unknown, options: { stale?: boolean } = {}): DashboardErrorState {
+  if (error instanceof DashboardRequestError) {
+    return {
+      code: error.payload.code,
+      title: dashboardErrorTitle(error.payload.code, error.status),
+      message: error.message || "Dashboard request failed.",
+      loginUrl: error.payload.loginUrl,
+      retryAfterSeconds: error.payload.retryAfterSeconds,
+      retryAt: error.payload.retryAt,
+      stale: options.stale,
+      status: error.status,
+    }
+  }
+
+  return {
+    title: "Dashboard failed",
+    message: error instanceof Error ? error.message : "Dashboard request failed.",
+    stale: options.stale,
+  }
+}
+
+function dashboardErrorTitle(code: string | undefined, status: number): string {
+  if (code === "github_rate_limit") return "GitHub rate limit reached"
+  if (code === "app_rate_limit" || status === 429) return "Too many requests"
+  return "Dashboard failed"
+}
+
+function isGithubRateLimitRequestError(error: unknown): boolean {
+  return error instanceof DashboardRequestError && error.payload.code === "github_rate_limit"
+}
+
+function isDashboardErrorPayload(value: unknown): value is DashboardErrorPayload {
+  if (typeof value !== "object" || value === null) return false
+  const payload = value as Record<string, unknown>
+  return (payload.code === undefined || typeof payload.code === "string")
+    && (payload.message === undefined || typeof payload.message === "string")
+    && (payload.loginUrl === undefined || typeof payload.loginUrl === "string")
+    && (payload.retryAfterSeconds === undefined || typeof payload.retryAfterSeconds === "number")
+    && (payload.retryAt === undefined || typeof payload.retryAt === "string")
+}
+
+function cacheMatchesPublicViewer(entry: DashboardCacheEntry | null, publicUsername: string | null): boolean {
+  return Boolean(
+    entry
+    && publicUsername
+    && entry.payload.viewer.login.toLowerCase() === publicUsername.toLowerCase()
+  )
 }
 
 function getInitialTheme(): Theme {
@@ -127,7 +219,7 @@ function App() {
     shouldLoadDashboard && !demoMode ? readDashboardCache(dashboardSourceKey) : null
   ))
   const [data, setData] = useState<DashboardPayload | null>(() => demoMode ? createDemoDashboard() : null)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<DashboardErrorState | null>(null)
   const [loading, setLoading] = useState(shouldLoadDashboard && !demoMode)
   const [refreshing, setRefreshing] = useState(false)
   const [updatingDetails, setUpdatingDetails] = useState(false)
@@ -135,7 +227,6 @@ function App() {
   const [visibility, setVisibility] = useState("all")
   const [language, setLanguage] = useState("all")
   const [ciState, setCiState] = useState("all")
-  const [sort, setSort] = useState<RepoSort>({ key: "pushedAt", direction: "desc" })
   const [repoScope, setRepoScope] = useState<RepoScope>("active")
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme())
@@ -222,14 +313,14 @@ function App() {
         return
       }
       if (!response.ok) {
-        throw new Error(`Dashboard API returned ${response.status}`)
+        throw await createDashboardRequestError(response)
       }
       const payload = await response.json() as DashboardPayload
       setNeedsLogin(false)
       setData(payload)
       writeDashboardCache(dashboardSourceKey, payload)
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Dashboard request failed.")
+      setError(toDashboardErrorState(requestError))
     } finally {
       setLoading(false)
       setRefreshing(false)
@@ -254,7 +345,7 @@ function App() {
         return null
       }
       if (!response.ok) {
-        throw new Error(`Dashboard API returned ${response.status}`)
+        throw await createDashboardRequestError(response)
       }
       if (!cancelled) setNeedsLogin(false)
       return await response.json() as DashboardPayload
@@ -284,7 +375,14 @@ function App() {
         }
       } catch (requestError) {
         if (!cancelled && !isAbortError(requestError)) {
-          setError(requestError instanceof Error ? requestError.message : "Dashboard request failed.")
+          const stale = isGithubRateLimitRequestError(requestError)
+            && cacheMatchesPublicViewer(initialDashboardCache, publicUsername)
+          if (stale) {
+            setData(initialDashboardCache!.payload)
+            setUpdatingDetails(false)
+            setNeedsLogin(false)
+          }
+          setError(toDashboardErrorState(requestError, { stale }))
           setLoading(false)
         }
       }
@@ -299,7 +397,10 @@ function App() {
         }
       } catch (requestError) {
         if (!cancelled && !isAbortError(requestError)) {
-          setError(requestError instanceof Error ? requestError.message : "Dashboard request failed.")
+          setError(toDashboardErrorState(requestError, {
+            stale: isGithubRateLimitRequestError(requestError)
+              && cacheMatchesPublicViewer(initialDashboardCache, publicUsername),
+          }))
         }
       } finally {
         if (!cancelled) setUpdatingDetails(false)
@@ -312,7 +413,7 @@ function App() {
       cancelled = true
       controller.abort()
     }
-  }, [applyAuthHeader, dashboardApiPath, dashboardSourceKey, demoMode, initialDashboardCache, shouldLoadDashboard])
+  }, [applyAuthHeader, dashboardApiPath, dashboardSourceKey, demoMode, initialDashboardCache, publicUsername, shouldLoadDashboard])
 
   const languages = useMemo(() => {
     if (!data) return []
@@ -368,8 +469,8 @@ function App() {
       .filter((repo) => visibility === "all" || repo.visibility === visibility)
       .filter((repo) => language === "all" || repo.language === language)
       .filter((repo) => ciState === "all" || getRepoCiState(repo) === ciState)
-      .sort((a, b) => compareRepos(a, b, sort))
-  }, [ciState, data, hiddenRepoIds, language, query, repoScope, sort, visibility, visibleRepos])
+      .sort((a, b) => compareRepos(a, b, DEFAULT_REPO_SORT))
+  }, [ciState, data, hiddenRepoIds, language, query, repoScope, visibility, visibleRepos])
 
   const handleVisibilityChange = useCallback((value: string) => {
     setVisibility(value)
@@ -407,28 +508,12 @@ function App() {
     })
   }, [])
 
-  const showAttentionScope = useCallback(() => {
-    setQuery("")
-    setVisibility("all")
-    setLanguage("all")
-    setCiState("all")
-    setRepoScope("all")
-  }, [])
-
-  const handleShowFailing = useCallback(() => {
-    showAttentionScope()
-    setCiState("failure")
-  }, [showAttentionScope])
-
-  const handleShowPullRequests = useCallback(() => {
-    showAttentionScope()
-    setSort({ key: "openPullRequests", direction: "desc" })
-  }, [showAttentionScope])
-
-  const handleShowIssues = useCallback(() => {
-    showAttentionScope()
-    setSort({ key: "openIssues", direction: "desc" })
-  }, [showAttentionScope])
+  const handleDemoLinkClick = useCallback((event: MouseEvent<HTMLDivElement>) => {
+    if (!demoMode) return
+    const target = event.target
+    if (!(target instanceof Element) || !target.closest("a[href]")) return
+    event.preventDefault()
+  }, [demoMode])
 
   if (!shouldLoadDashboard || needsLogin) {
     return <Homepage theme={theme} onThemeToggle={toggleTheme} />
@@ -440,7 +525,10 @@ function App() {
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="min-h-screen bg-background text-foreground lg:h-screen lg:overflow-hidden">
+      <div
+        className="min-h-screen bg-background text-foreground lg:h-screen lg:overflow-hidden"
+        onClickCapture={demoMode ? handleDemoLinkClick : undefined}
+      >
         <main className="min-w-0 lg:h-screen lg:min-h-0">
           <Header
             data={data}
@@ -462,47 +550,35 @@ function App() {
             onRefresh={() => void loadDashboard(true)}
           />
           <div className="flex min-h-0 flex-col gap-3 p-3 lg:h-[calc(100vh-3.5rem)] lg:overflow-hidden">
-            {error ? <ErrorPanel message={error} retrying={refreshing} onRetry={() => void loadDashboard(true)} /> : null}
+            {error ? <ErrorPanel error={error} retrying={refreshing} onRetry={() => void loadDashboard(true)} /> : null}
             {data ? (
-              <>
-                <AttentionStrip
-                  repos={visibleRepos}
-                  runs={visibleRuns}
+              <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px] 2xl:grid-cols-[minmax(0,1fr)_340px]">
+                <FocusView
+                  repos={filteredRepos}
+                  scope={repoScope}
+                  activeCount={activeCount}
+                  totalCount={visibleRepos.length}
+                  hiddenCount={hiddenRepoIds.size}
+                  commits={visibleActivity.commits}
+                  pullRequests={visibleActivity.pullRequests}
+                  issues={visibleActivity.issues}
+                  isUpdating={data.detailLevel === "quick"}
+                  selectedRepo={selectedRepo}
+                  viewerLogin={data.viewer.login}
+                  onScopeChange={handleRepoScopeChange}
+                  onSelectRepo={setSelectedRepo}
+                  onToggleRepoHidden={handleToggleRepoHidden}
+                />
+                <OperationalRail
                   billing={data.billing}
                   detailLevel={data.detailLevel}
+                  runs={visibleRuns}
+                  warnings={data.warnings}
                   dismissedRunIds={dismissedRunIds}
-                  onShowFailing={handleShowFailing}
-                  onShowPullRequests={handleShowPullRequests}
-                  onShowIssues={handleShowIssues}
+                  onDismissRun={handleDismissRun}
+                  onRestoreRuns={handleRestoreRuns}
                 />
-                <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px] 2xl:grid-cols-[minmax(0,1fr)_340px]">
-                  <FocusView
-                    repos={filteredRepos}
-                    scope={repoScope}
-                    activeCount={activeCount}
-                    totalCount={visibleRepos.length}
-                    hiddenCount={hiddenRepoIds.size}
-                    commits={visibleActivity.commits}
-                    pullRequests={visibleActivity.pullRequests}
-                    issues={visibleActivity.issues}
-                    isUpdating={data.detailLevel === "quick"}
-                    selectedRepo={selectedRepo}
-                    viewerLogin={data.viewer.login}
-                    onScopeChange={handleRepoScopeChange}
-                    onSelectRepo={setSelectedRepo}
-                    onToggleRepoHidden={handleToggleRepoHidden}
-                  />
-                  <OperationalRail
-                    billing={data.billing}
-                    detailLevel={data.detailLevel}
-                    runs={visibleRuns}
-                    warnings={data.warnings}
-                    dismissedRunIds={dismissedRunIds}
-                    onDismissRun={handleDismissRun}
-                    onRestoreRuns={handleRestoreRuns}
-                  />
-                </div>
-              </>
+              </div>
             ) : null}
           </div>
         </main>
@@ -604,18 +680,11 @@ function Header({
           />
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Button variant="outline" size="default" onClick={onRefresh} disabled={refreshing}>
+          <Button variant="outline" size="sm" onClick={onRefresh} disabled={refreshing}>
             <RefreshCcwIcon data-icon="inline-start" className={refreshing ? "animate-spin motion-reduce:animate-none" : undefined} />
             {refreshing ? "Refreshing" : "Refresh"}
           </Button>
           <div className="hidden min-w-0 items-center gap-2 px-1 text-sm text-muted-foreground md:flex lg:hidden xl:flex">
-            <CircleDotIcon
-              className={cn(
-                "size-4 text-status-success",
-                updatingDetails && "animate-pulse text-status-info motion-reduce:animate-none"
-              )}
-              aria-hidden="true"
-            />
             <span className="truncate" aria-live="polite">
               {updatingDetails ? "Updating" : data ? `Refreshed ${formatRelative(data.generatedAt)}` : "Ready"}
             </span>
@@ -679,10 +748,6 @@ function HeaderFilters({
 }) {
   return (
     <div className="flex w-full shrink-0 flex-wrap items-center gap-2 text-sm md:w-auto md:flex-nowrap">
-      <div className="hidden items-center gap-1 text-muted-foreground md:flex">
-        <SlidersHorizontalIcon className="size-4" aria-hidden="true" />
-        <span className="sr-only">Filters</span>
-      </div>
       <Select value={visibility} onValueChange={onVisibilityChange}>
         <SelectTrigger size="sm" className="h-8 min-w-32 flex-1 bg-card sm:flex-none md:w-32">
           <SelectValue placeholder="Visibility" />
@@ -744,31 +809,33 @@ function Homepage({
 
   return (
     <div className="min-h-screen bg-background text-foreground [text-wrap:pretty]">
-      <div className="mx-auto max-w-[1080px] px-6 min-[520px]:px-10">
+      <div className="mx-auto max-w-[1320px] px-6 min-[520px]:px-10">
         <header className="flex items-center pt-9">
           <a href="/" className="flex items-center gap-[9px] text-[17px] leading-none font-semibold" aria-label="okgithub home">
             <SiGithub className="size-7" aria-hidden="true" />
             okgithub
           </a>
           <div className="flex-1" />
-          <button
+          <Button
             type="button"
             onClick={onThemeToggle}
             title="Toggle theme"
             aria-label="Toggle theme"
-            className="inline-flex size-[34px] items-center justify-center rounded-[7px] border border-border bg-card text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none"
+            variant="outline"
+            size="icon-lg"
+            className="text-muted-foreground"
           >
-            {theme === "dark" ? <SunIcon className="size-[15px]" aria-hidden="true" /> : <MoonIcon className="size-[15px]" aria-hidden="true" />}
-          </button>
+            {theme === "dark" ? <SunIcon aria-hidden="true" /> : <MoonIcon aria-hidden="true" />}
+          </Button>
         </header>
 
         <main>
           <section className="mx-auto max-w-[620px] pt-16 text-center">
             <h1 className="m-0 text-[44px] leading-[1.15] font-semibold tracking-[-0.02em]">
-              An actual usable GitHub homepage.
+              A better GitHub homepage.
             </h1>
             <p className="mt-4 text-[17px] leading-[1.6] font-normal text-muted-foreground">
-              One dense view of everything you check GitHub for — PRs, issues, commits, CI, and Actions billing across all your repos. Enter a username. No login required.
+              One view of everything: PRs, issues, commits, CI, and Actions billing across all your repos. No login needed unless you want to see the private stuff. Open source.
             </p>
 
             <div className="mx-auto mt-7 max-w-[460px]">
@@ -781,7 +848,7 @@ function Homepage({
                   }
                 }}
               >
-                <input
+                <Input
                   value={username}
                   onChange={(event) => setUsername(event.target.value)}
                   placeholder="github username"
@@ -789,14 +856,14 @@ function Homepage({
                   autoCapitalize="none"
                   autoCorrect="off"
                   spellCheck={false}
-                  className="h-[42px] min-w-0 flex-1 rounded-lg border border-border bg-card px-3.5 text-[15px] leading-none font-normal text-foreground outline-none transition-colors duration-150 placeholder:text-muted-foreground placeholder:opacity-70 focus:border-muted-foreground"
+                  className="h-[42px] flex-1 bg-card px-3.5 text-[15px]"
                 />
-                <button
+                <Button
                   type="submit"
-                  className="inline-flex h-[42px] items-center justify-center rounded-lg bg-primary px-[18px] text-[14px] leading-none font-semibold whitespace-nowrap text-primary-foreground transition-opacity duration-150 hover:opacity-85 focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none"
+                  className="h-[42px] px-[18px] text-[14px]"
                 >
                   Open public view
-                </button>
+                </Button>
               </form>
               <p className="mt-3 text-[13px] leading-[1.5] font-normal text-muted-foreground">
                 Or{" "}
@@ -810,14 +877,14 @@ function Homepage({
 
           <section className="mt-14" aria-label="Demo dashboard">
             <div className="mb-2.5 flex items-center gap-2.5 font-mono text-[12.5px] leading-none font-medium text-muted-foreground">
-              <a href="/demo" className="rounded-md bg-muted px-2 py-1 font-mono text-[12px] leading-none font-semibold text-foreground hover:underline">
-                /demo
-              </a>
-              <span>live with sample data, no GitHub calls — click tabs and repos</span>
+              <Button asChild variant="secondary" size="xs" className="font-mono">
+                <a href="/demo">/demo</a>
+              </Button>
+              <span>live with sample data</span>
             </div>
             <ScaledDemoFrame>
               <iframe
-                src={`/demo?theme=${theme}`}
+                src={`/demo?theme=${theme}&preview=${DEMO_PREVIEW_VERSION}`}
                 title="Live demo dashboard"
                 className="block border-0 bg-background"
                 style={{ width: DASHBOARD_PREVIEW_WIDTH, height: DASHBOARD_PREVIEW_HEIGHT }}
@@ -915,28 +982,56 @@ function ScaledDemoFrame({ children }: { children: ReactNode }) {
 }
 
 function ErrorPanel({
-  message,
+  error,
   retrying,
   onRetry,
 }: {
-  message: string
+  error: DashboardErrorState
   retrying: boolean
   onRetry: () => void
 }) {
+  const retryMessage = rateLimitRetryMessage(error)
+
   return (
     <Alert variant="destructive">
-      <AlertTitle>Dashboard failed</AlertTitle>
+      <AlertTitle>{error.title}</AlertTitle>
       <AlertDescription>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <span>{message}</span>
-          <Button variant="outline" size="sm" onClick={onRetry} disabled={retrying}>
-            <RefreshCcwIcon data-icon="inline-start" className={retrying ? "animate-spin motion-reduce:animate-none" : undefined} />
-            {retrying ? "Retrying" : "Retry"}
-          </Button>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0 space-y-1">
+            <p>{error.message}</p>
+            {error.stale ? (
+              <p>Showing cached data while GitHub public data is temporarily unavailable.</p>
+            ) : null}
+            {retryMessage ? <p>{retryMessage}</p> : null}
+          </div>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            {error.loginUrl ? (
+              <Button asChild variant="outline" size="sm">
+                <a href={error.loginUrl}>Sign in with GitHub</a>
+              </Button>
+            ) : null}
+            <Button variant="outline" size="sm" onClick={onRetry} disabled={retrying}>
+              <RefreshCcwIcon data-icon="inline-start" className={retrying ? "animate-spin motion-reduce:animate-none" : undefined} />
+              {retrying ? "Retrying" : "Retry"}
+            </Button>
+          </div>
         </div>
       </AlertDescription>
     </Alert>
   )
+}
+
+function rateLimitRetryMessage(error: DashboardErrorState): string | null {
+  if (!error.retryAfterSeconds) return null
+
+  const seconds = Math.max(1, Math.ceil(error.retryAfterSeconds))
+  if (seconds < 60) return `Try again in about ${seconds} second${seconds === 1 ? "" : "s"}.`
+
+  const minutes = Math.ceil(seconds / 60)
+  if (minutes < 60) return `Try again in about ${minutes} minute${minutes === 1 ? "" : "s"}.`
+
+  const hours = Math.ceil(minutes / 60)
+  return `Try again in about ${hours} hour${hours === 1 ? "" : "s"}.`
 }
 
 function getRepoCiState(repo: RepoSummary): string {

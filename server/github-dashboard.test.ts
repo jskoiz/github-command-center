@@ -215,10 +215,24 @@ function repoNameWithOwner(repo: unknown) {
     : "jskoiz/active-repo"
 }
 
+const ORIGINAL_GITHUB_ENV = {
+  GITHUB_PUBLIC_TOKEN: process.env.GITHUB_PUBLIC_TOKEN,
+  GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+  GH_TOKEN: process.env.GH_TOKEN,
+}
+
 afterEach(() => {
   configureGithubDashboardForTests(null)
   vi.unstubAllGlobals()
+  restoreEnv("GITHUB_PUBLIC_TOKEN", ORIGINAL_GITHUB_ENV.GITHUB_PUBLIC_TOKEN)
+  restoreEnv("GITHUB_TOKEN", ORIGINAL_GITHUB_ENV.GITHUB_TOKEN)
+  restoreEnv("GH_TOKEN", ORIGINAL_GITHUB_ENV.GH_TOKEN)
 })
+
+function restoreEnv(name: keyof typeof ORIGINAL_GITHUB_ENV, value: string | undefined) {
+  if (value === undefined) delete process.env[name]
+  else process.env[name] = value
+}
 
 describe("getGithubDashboard request coalescing", () => {
   it("shares simultaneous identical full loads", async () => {
@@ -304,6 +318,9 @@ describe("getGithubDashboard request coalescing", () => {
 
 describe("getPublicGithubDashboard", () => {
   it("loads public profile quick data without an OAuth Authorization header", async () => {
+    delete process.env.GITHUB_PUBLIC_TOKEN
+    process.env.GITHUB_TOKEN = "ghp_not_for_public_profiles"
+    process.env.GH_TOKEN = "ghp_not_for_public_profiles"
     const fetchMock = vi.fn(async (...[input]: [string | URL | Request, RequestInit?]) => {
       const url = input.toString()
       if (url.endsWith("/users/jskoiz")) {
@@ -337,6 +354,38 @@ describe("getPublicGithubDashboard", () => {
     expect(fetchMock.mock.calls.every(([, init]) => {
       const headers = (init as RequestInit | undefined)?.headers as Record<string, string> | undefined
       return headers?.Authorization === undefined
+    })).toBe(true)
+  })
+
+  it("uses only GITHUB_PUBLIC_TOKEN for hosted public profile requests", async () => {
+    process.env.GITHUB_PUBLIC_TOKEN = "ghp_public_rate_token"
+    process.env.GITHUB_TOKEN = "ghp_not_for_public_profiles"
+    process.env.GH_TOKEN = "ghp_not_for_public_profiles"
+    const fetchMock = vi.fn(async (...[input]: [string | URL | Request, RequestInit?]) => {
+      const url = input.toString()
+      if (url.endsWith("/users/jskoiz")) {
+        return jsonResponse({
+          login: "jskoiz",
+          name: "saburo",
+          avatar_url: "https://example.com/avatar.png",
+          html_url: "https://github.com/jskoiz",
+        })
+      }
+      if (url.endsWith("/users/jskoiz/repos?per_page=8&sort=pushed&type=owner")) {
+        return jsonResponse([createRawRepo({
+          visibility: "public",
+          private: false,
+        })])
+      }
+      throw new Error(`Unhandled fetch ${url}`)
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    await getPublicGithubDashboard("jskoiz", { force: true, quick: true, scanLimit: 8 })
+
+    expect(fetchMock.mock.calls.every(([, init]) => {
+      const headers = (init as RequestInit | undefined)?.headers as Record<string, string> | undefined
+      return headers?.Authorization === "Bearer ghp_public_rate_token"
     })).toBe(true)
   })
 })

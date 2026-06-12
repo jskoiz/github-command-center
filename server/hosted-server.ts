@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto"
 import type { IncomingMessage, ServerResponse } from "node:http"
 import { extname, join, normalize, parse, sep } from "node:path"
 
+import { isGithubRateLimitError, type GithubApiError } from "./github-client.ts"
 import {
   openSession,
   parseCookies,
@@ -67,6 +68,15 @@ type DashboardLoaderOptions = {
 type PublicDashboardLoaderOptions = Omit<DashboardLoaderOptions, "auth">
 
 type HostedLogger = Pick<Console, "error" | "warn">
+type AuthHeader = "oauth" | "public"
+
+type PublicGithubRateLimitPayload = {
+  code: "github_rate_limit"
+  message: string
+  loginUrl?: string
+  retryAfterSeconds?: number
+  retryAt?: string
+}
 
 export type HostedServerDependencies = {
   baseUrl: string
@@ -314,7 +324,7 @@ async function handleDashboard(
       `${dashboardRateLimitPrefix({ force, quick })}:${session.login}`
     )
     if (!limit.allowed) {
-      sendRateLimit(res, limit, { authHeader: true })
+      sendRateLimit(res, limit, { authHeader: "oauth" })
       return
     }
 
@@ -351,7 +361,7 @@ async function handlePublicDashboard(
       `${dashboardRateLimitPrefix({ force, quick })}:public:${username.toLowerCase()}:${remoteAddressBucket(req, dependencies.trustProxy ?? false)}`
     )
     if (!limit.allowed) {
-      sendRateLimit(res, limit, { authHeader: false })
+      sendRateLimit(res, limit, { authHeader: "public" })
       return
     }
 
@@ -363,9 +373,21 @@ async function handlePublicDashboard(
     res.setHeader("x-gcc-auth", "public")
     sendJson(res, 200, payload)
   } catch (error) {
+    res.setHeader("x-gcc-auth", "public")
+    if (isPublicGithubRateLimitError(error)) {
+      sendJson(res, 403, publicGithubRateLimitPayload(dependencies, error))
+      return
+    }
+
     const status = (error as { status?: number }).status
-    const message = error instanceof Error ? error.message : "Public dashboard request failed."
-    sendJson(res, status && status >= 400 && status < 600 ? status : 500, { message })
+    if (status && status >= 400 && status < 500) {
+      const message = error instanceof Error ? error.message : "Public dashboard request failed."
+      sendJson(res, status, { message })
+      return
+    }
+
+    dependencies.logger.error("Public dashboard request failed:", error)
+    sendJson(res, 500, { message: "Public dashboard request failed. Try again shortly." })
   }
 }
 
@@ -412,6 +434,32 @@ function oauthUnavailablePayload() {
   return {
     message: "GitHub OAuth is not configured. Open /:username to view a public profile dashboard.",
   }
+}
+
+function isPublicGithubRateLimitError(error: unknown): error is GithubApiError {
+  if (isGithubRateLimitError(error)) return true
+
+  const status = (error as { status?: unknown }).status
+  return status === 403 && error instanceof Error && /rate limit/i.test(error.message)
+}
+
+function publicGithubRateLimitPayload(
+  dependencies: HostedServerDependencies,
+  error: GithubApiError
+): PublicGithubRateLimitPayload {
+  const oauthConfigured = isOAuthConfigured(dependencies)
+  const payload: PublicGithubRateLimitPayload = {
+    code: "github_rate_limit",
+    message: oauthConfigured
+      ? "GitHub rate limit reached for public dashboards. Sign in with GitHub to use your own API quota, or try again later."
+      : "GitHub rate limit reached for public dashboards. GitHub sign-in is not configured on this deployment; try again later.",
+  }
+
+  if (oauthConfigured) payload.loginUrl = "/auth/login"
+  if (typeof error.retryAfterSeconds === "number") payload.retryAfterSeconds = Math.max(1, Math.ceil(error.retryAfterSeconds))
+  if (typeof error.retryAt === "string") payload.retryAt = error.retryAt
+
+  return payload
 }
 
 function pruneExpiredRevocations() {
@@ -496,9 +544,13 @@ function sendJson(res: ServerResponse, status: number, payload: unknown) {
 function sendRateLimit(
   res: ServerResponse,
   limit: Extract<RateLimitResult, { allowed: false }>,
-  options: { authHeader?: boolean } = {}
+  options: { authHeader?: AuthHeader } = {}
 ) {
-  if (options.authHeader) res.setHeader("x-gcc-auth", "oauth")
+  if (options.authHeader) res.setHeader("x-gcc-auth", options.authHeader)
   res.setHeader("Retry-After", String(limit.retryAfterSeconds))
-  sendJson(res, 429, { message: RATE_LIMIT_MESSAGE })
+  sendJson(res, 429, {
+    code: "app_rate_limit",
+    message: RATE_LIMIT_MESSAGE,
+    retryAfterSeconds: limit.retryAfterSeconds,
+  })
 }

@@ -48,13 +48,18 @@ encrypted httpOnly cookie, never on disk.
 
 Public profile routes can run anonymously, but GitHub's anonymous REST bucket is
 small. Set `GITHUB_PUBLIC_TOKEN` on the server to raise that limit without
-requiring visitors to log in.
+requiring visitors to log in. The server intentionally does not reuse
+`GITHUB_TOKEN` or `GH_TOKEN` for public pages; hosted deployments must set the
+explicit public token when they need more than anonymous quota. If OAuth is
+configured and the public quota is exhausted, visitors see a sign-in action so
+they can retry with their own GitHub API quota.
 
 1. Configure the public deployment URL:
 
    ```sh
    BASE_URL=https://gcc.example.com
    PORT=3000
+   GITHUB_PUBLIC_TOKEN=...
    ```
 
 2. Optional: create a **GitHub OAuth App** at <https://github.com/settings/developers>:
@@ -93,6 +98,7 @@ limit repeated sign-in attempts and expensive dashboard fanout.
 docker build -t github-command-center .
 docker run -p 3000:3000 \
   -e BASE_URL=https://gcc.example.com \
+  -e GITHUB_PUBLIC_TOKEN=... \
   github-command-center
 ```
 

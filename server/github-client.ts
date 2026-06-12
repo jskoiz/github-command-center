@@ -3,6 +3,14 @@ const REQUEST_TIMEOUT_MS = 30_000
 const MAX_PAGINATED_PAGES = 10
 
 export type GhExecutor = (args: string[], endpoint: string) => Promise<string>
+export type GithubApiError = Error & {
+  stderr?: string
+  endpoint?: string
+  status?: number
+  code?: "github_rate_limit"
+  retryAfterSeconds?: number
+  retryAt?: string
+}
 
 export class PaginationLimitError extends Error {
   readonly endpoint: string
@@ -22,10 +30,8 @@ export function isPaginationLimitError(error: unknown): error is PaginationLimit
   return error instanceof PaginationLimitError
 }
 
-type GhApiError = Error & {
-  stderr?: string
-  endpoint?: string
-  status?: number
+export function isGithubRateLimitError(error: unknown): error is GithubApiError {
+  return Boolean(error && typeof error === "object" && (error as GithubApiError).code === "github_rate_limit")
 }
 
 /**
@@ -178,18 +184,47 @@ async function githubFetch(
     } catch {
       // Non-JSON error bodies still surface the status code above.
     }
-    throw createApiError(message, endpoint, response.status)
+    const retryAfterSeconds = retryAfterFromHeaders(response.headers)
+    const isRateLimit =
+      response.status === 403
+      && (
+        response.headers.get("x-ratelimit-remaining") === "0"
+        || /rate limit/i.test(message)
+      )
+    throw createApiError(message, endpoint, response.status, isRateLimit ? {
+      code: "github_rate_limit",
+      retryAfterSeconds,
+      retryAt: retryAfterSeconds ? new Date(Date.now() + retryAfterSeconds * 1000).toISOString() : undefined,
+    } : undefined)
   }
 
   return response
 }
 
-function createApiError(message: string, endpoint: string, status?: number): GhApiError {
-  const error = new Error(message) as GhApiError
+function createApiError(
+  message: string,
+  endpoint: string,
+  status?: number,
+  options: Pick<GithubApiError, "code" | "retryAfterSeconds" | "retryAt"> = {}
+): GithubApiError {
+  const error = new Error(message) as GithubApiError
   error.stderr = message
   error.endpoint = endpoint
   error.status = status
+  if (options.code) error.code = options.code
+  if (options.retryAfterSeconds) error.retryAfterSeconds = options.retryAfterSeconds
+  if (options.retryAt) error.retryAt = options.retryAt
   return error
+}
+
+function retryAfterFromHeaders(headers: Headers): number | undefined {
+  const retryAfter = Number(headers.get("retry-after"))
+  if (Number.isFinite(retryAfter) && retryAfter > 0) return Math.ceil(retryAfter)
+
+  const resetSeconds = Number(headers.get("x-ratelimit-reset"))
+  if (!Number.isFinite(resetSeconds) || resetSeconds <= 0) return undefined
+
+  return Math.max(1, Math.ceil((resetSeconds * 1000 - Date.now()) / 1000))
 }
 
 function toApiUrl(target: string): string {

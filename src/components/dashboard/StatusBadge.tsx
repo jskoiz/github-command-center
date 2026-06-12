@@ -23,7 +23,7 @@ export function StatusBadge({
         variant={tone === "danger" ? "destructive" : "outline"}
         aria-label={label}
         title={label}
-        className={cn("size-5 rounded-full px-0 [&>svg]:size-3.5", toneClassName(tone), className)}
+        className={cn("size-5 rounded-full px-0 [&>svg]:size-3.5", toneClassName(tone, true), className)}
       >
         {renderCompactIcon(tone)}
         <span className="sr-only">{label}</span>
@@ -34,7 +34,7 @@ export function StatusBadge({
   return (
     <Badge
       variant={tone === "danger" ? "destructive" : "outline"}
-      className={cn(toneClassName(tone), className)}
+      className={cn(toneClassName(tone, false), className)}
     >
       <span className="size-1.5 rounded-full bg-current" aria-hidden="true" />
       {label}
@@ -42,8 +42,12 @@ export function StatusBadge({
   )
 }
 
-function toneClassName(tone: GithubStatusTone): string {
-  if (tone === "success") return "border-status-success/25 bg-status-success/10 text-status-success"
+function toneClassName(tone: GithubStatusTone, compact: boolean): string {
+  if (tone === "success") {
+    return compact
+      ? "border-transparent text-muted-foreground/60"
+      : "border-status-success/25 bg-status-success/10 text-status-success"
+  }
   if (tone === "danger") return "border-destructive/25"
   if (tone === "warning") return "border-status-warning/25 bg-status-warning/10 text-status-warning"
   if (tone === "running") return "border-status-info/25 bg-status-info/10 text-status-info"

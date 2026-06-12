@@ -120,39 +120,39 @@ function BillingCard({ billing }: { billing: BillingSummary }) {
 
   return (
     <Card id="costs" className="min-h-0 shrink-0 gap-0 rounded-lg py-0 shadow-sm shadow-foreground/[0.02] lg:max-h-[34vh]" size="sm">
-      <CardHeader className="min-h-10 border-b px-3 py-2 [.border-b]:pb-2">
+      <CardHeader className="min-h-9 border-b px-3 py-1.5 [.border-b]:pb-1.5">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <CardTitle className="text-sm leading-tight">GitHub Actions Billing</CardTitle>
+            <CardTitle className="text-[13px] font-semibold leading-none">GitHub Actions Billing</CardTitle>
             <CardDescription className="text-xs">{formatMonth(billing.year, billing.month)}</CardDescription>
           </div>
           <CircleDollarSignIcon className="size-4 text-muted-foreground" aria-hidden="true" />
         </div>
       </CardHeader>
-      <CardContent className="flex min-h-0 flex-col gap-2.5 overflow-y-auto px-3 py-2 [scrollbar-gutter:stable]">
+      <CardContent className="flex min-h-0 flex-col gap-2.5 overflow-y-auto px-2 py-2 [scrollbar-gutter:stable]">
         {billing.available ? (
           <>
             <div className="flex items-baseline justify-between gap-3">
               <div className="flex items-baseline gap-1.5">
-                <span className="font-mono text-xl leading-none">{formatMoney(billing.netAmount)}</span>
+                <span className="font-mono text-xl leading-none tabular-nums">{formatMoney(billing.netAmount)}</span>
                 <span className="text-xs text-muted-foreground">billed</span>
               </div>
               <div className="text-xs text-muted-foreground">
-                <span className="font-mono">{formatMoney(billing.grossAmount)}</span> gross
+                <span className="font-mono tabular-nums">{formatMoney(billing.grossAmount)}</span> gross
               </div>
             </div>
             <div className="flex flex-col gap-1">
               <Progress value={coveredPercent} />
               <div className="flex justify-between gap-3 text-xs text-muted-foreground">
                 <span>Covered by plan</span>
-                <span className="font-mono">{formatMoney(billing.discountAmount)}</span>
+                <span className="font-mono tabular-nums">{formatMoney(billing.discountAmount)}</span>
               </div>
             </div>
             <div className="flex flex-col gap-1 border-t pt-2 text-xs">
               {billing.unitTotals.map((unit) => (
                 <div key={unit.unitType} className="flex items-center justify-between gap-3">
                   <span className="text-muted-foreground">{billingUnitLabel(unit.unitType)}</span>
-                  <span className="font-mono whitespace-nowrap">{formatNumber(unit.quantity)}</span>
+                  <span className="font-mono whitespace-nowrap tabular-nums">{formatNumber(unit.quantity)}</span>
                 </div>
               ))}
             </div>
@@ -160,8 +160,8 @@ function BillingCard({ billing }: { billing: BillingSummary }) {
               {billing.skus.slice(0, 3).map((sku) => (
                 <div key={sku.sku} className="grid grid-cols-[1fr_auto_auto] items-center gap-2">
                   <span className="min-w-0 truncate text-muted-foreground">{sku.sku}</span>
-                  <span className="font-mono whitespace-nowrap text-[11px] text-muted-foreground">{formatBillingQuantity(sku.quantity, sku.unitType)}</span>
-                  <span className="font-mono whitespace-nowrap">{formatMoney(sku.grossAmount)}</span>
+                  <span className="font-mono whitespace-nowrap text-[11px] text-muted-foreground tabular-nums">{formatBillingQuantity(sku.quantity, sku.unitType)}</span>
+                  <span className="font-mono whitespace-nowrap tabular-nums">{formatMoney(sku.grossAmount)}</span>
                 </div>
               ))}
             </div>
@@ -196,10 +196,10 @@ function CiCard({
 
   return (
     <Card id="ci" className="min-h-0 shrink-0 gap-0 rounded-lg py-0 shadow-sm shadow-foreground/[0.02] lg:max-h-[34vh]" size="sm">
-      <CardHeader className="min-h-10 border-b px-3 py-2 [.border-b]:pb-2">
+      <CardHeader className="min-h-9 border-b px-3 py-1.5 [.border-b]:pb-1.5">
         <div className="flex items-center justify-between gap-2">
           <div>
-            <CardTitle className="text-sm leading-tight">Workflow Failures</CardTitle>
+            <CardTitle className="text-[13px] font-semibold leading-none">Workflow Failures</CardTitle>
             <CardDescription className="text-xs">
               {isUpdating
                 ? "Workflow details updating"
@@ -229,13 +229,17 @@ function CiCard({
               <a href={run.url} target="_blank" rel="noreferrer" className="flex flex-col gap-0.5 rounded-md px-1.5 py-1 pr-7 outline-none transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40">
                 <div className="flex items-center justify-between gap-3">
                   <span className="min-w-0 truncate font-medium">{run.name}</span>
-                  <StatusBadge state={run.conclusion ?? run.status} />
+                  {isGithubStatusFailure(run.conclusion ?? run.status) ? (
+                    <span className="size-1.5 shrink-0 rounded-full bg-destructive" role="img" aria-label="failing" />
+                  ) : (
+                    <StatusBadge state={run.conclusion ?? run.status} />
+                  )}
                 </div>
                 <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
                   <span className="truncate">{shortRepoName(run.repo)} · {formatDuration(run.durationSeconds)}</span>
                   <span className="inline-flex items-center gap-1">
                     {formatRelative(run.createdAt)}
-                    <ExternalLinkIcon className="size-3" aria-hidden="true" />
+                    <ExternalLinkIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden="true" />
                   </span>
                 </div>
               </a>

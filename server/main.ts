@@ -30,6 +30,9 @@ if (SESSION_SECRET.length < 32) {
   console.error("SESSION_SECRET must be at least 32 characters. Generate one with: openssl rand -hex 32")
   process.exit(1)
 }
+if (!process.env.GITHUB_PUBLIC_TOKEN) {
+  console.warn("GITHUB_PUBLIC_TOKEN is not set; hosted public dashboards will use GitHub's anonymous REST quota.")
+}
 
 const sessionKey = deriveSessionKey(SESSION_SECRET)
 const secureCookies = BASE_URL.startsWith("https://")

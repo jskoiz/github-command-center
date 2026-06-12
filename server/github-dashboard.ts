@@ -240,7 +240,7 @@ export async function getPublicGithubDashboard(
 }
 
 function publicGithubToken(): string | null {
-  return process.env.GITHUB_PUBLIC_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN || null
+  return process.env.GITHUB_PUBLIC_TOKEN || null
 }
 
 function normalizeGithubLogin(username: string): string {

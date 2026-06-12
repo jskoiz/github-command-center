@@ -2,7 +2,13 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { createPublicExecutor, createTokenExecutor, PaginationLimitError, revokeOAuthToken } from "./github-client.ts"
+import {
+  createPublicExecutor,
+  createTokenExecutor,
+  isGithubRateLimitError,
+  PaginationLimitError,
+  revokeOAuthToken,
+} from "./github-client.ts"
 
 function jsonResponse(body: unknown, options: { status?: number; headers?: Record<string, string> } = {}) {
   const headers = new Headers(options.headers)
@@ -138,6 +144,37 @@ describe("createTokenExecutor", () => {
     expect(thrown).toBeInstanceOf(Error)
     expect((thrown as Error).message).toContain("GitHub API returned 403")
     expect((thrown as Error).message).not.toContain(token)
+  })
+
+  it("marks GitHub REST rate limit responses with retry metadata", async () => {
+    const fetchMock = installFetchMock()
+    fetchMock.mockResolvedValueOnce(jsonResponse(
+      { message: "API rate limit exceeded for 203.0.113.10." },
+      {
+        status: 403,
+        headers: {
+          "Retry-After": "60",
+          "X-RateLimit-Remaining": "0",
+        },
+      }
+    ))
+    const executor = createTokenExecutor("gho_secret")
+
+    let thrown: unknown
+    try {
+      await executor(["api", "/users/jskoiz"], "/users/jskoiz")
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(isGithubRateLimitError(thrown)).toBe(true)
+    expect(thrown).toMatchObject({
+      code: "github_rate_limit",
+      endpoint: "/users/jskoiz",
+      retryAfterSeconds: 60,
+      status: 403,
+    })
+    expect(Date.parse((thrown as { retryAt: string }).retryAt)).not.toBeNaN()
   })
 
   it("sends GraphQL queries and typed fields in the POST body", async () => {

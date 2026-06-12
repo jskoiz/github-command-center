@@ -11,7 +11,6 @@ import {
 import type { ReactNode } from "react"
 
 import type { RepoScope } from "@/App"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -206,7 +205,7 @@ function RepoSidebar({
   return (
     <Card id="repos" role="region" aria-label="Repositories" className="min-h-0 gap-0 rounded-lg py-0 shadow-sm shadow-foreground/[0.02] max-lg:max-h-72 lg:row-span-2 lg:h-full xl:row-span-1" size="sm">
       <CardHeader className="min-h-9 items-center border-b px-3 py-1.5 [.border-b]:pb-1.5">
-        <CardTitle className="flex items-center gap-2 text-xs leading-none font-semibold">
+        <CardTitle className="flex items-center gap-2 text-[13px] font-semibold leading-none">
           Repos
         </CardTitle>
         <CardAction className="self-center">
@@ -219,7 +218,7 @@ function RepoSidebar({
               title="Repos pushed in the last 30 days"
               onClick={() => onScopeChange("active")}
             >
-              Active {activeCount}
+              Active <span className="font-normal text-muted-foreground tabular-nums">{activeCount}</span>
             </Button>
             <Button
               variant={scope === "all" ? "secondary" : "ghost"}
@@ -229,7 +228,7 @@ function RepoSidebar({
               title="All repos that are not hidden"
               onClick={() => onScopeChange("all")}
             >
-              All {totalCount}
+              All <span className="font-normal text-muted-foreground tabular-nums">{totalCount}</span>
             </Button>
             {hiddenCount > 0 || scope === "hidden" ? (
               <Button
@@ -241,24 +240,26 @@ function RepoSidebar({
                 onClick={() => onScopeChange("hidden")}
               >
                 <EyeOffIcon className="size-3" aria-hidden="true" />
-                {hiddenCount}
+                <span className="font-normal text-muted-foreground tabular-nums">{hiddenCount}</span>
                 <span className="sr-only">hidden repos</span>
               </Button>
             ) : null}
           </div>
         </CardAction>
       </CardHeader>
-      <CardContent className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto px-1.5 py-1.5 text-xs [scrollbar-gutter:stable]">
-        <button
-          type="button"
-          onClick={() => onSelectRepo(null)}
-          className={cn(
-            "flex items-center gap-2 rounded-md px-2 py-1.5 text-left font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
-            selectedRepo === null ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-          )}
-        >
-          All repositories
-        </button>
+      <CardContent className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto px-2 py-1.5 text-xs [scrollbar-gutter:stable]">
+        <div className="mb-1 border-b border-border/70 pb-1">
+          <button
+            type="button"
+            onClick={() => onSelectRepo(null)}
+            className={cn(
+              "flex items-center gap-2 rounded-md px-2 py-1.5 text-left font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+              selectedRepo === null ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+            )}
+          >
+            All repositories
+          </button>
+        </div>
         {repos.map((repo) => {
           const isSelected = repo.fullName === selectedRepo
           return (
@@ -281,7 +282,7 @@ function RepoSidebar({
                   {repo.owner === viewerLogin ? repo.name : repo.fullName}
                 </span>
                 {(repo.openPullRequests ?? 0) > 0 ? (
-                  <span className="shrink-0 font-mono text-[11px] text-status-info" title={`${repo.openPullRequests} open PRs`}>
+                  <span className="shrink-0 font-mono text-[11px] text-muted-foreground tabular-nums transition-opacity group-hover:opacity-0" title={`${repo.openPullRequests} open PRs`}>
                     {formatCompactNumber(repo.openPullRequests ?? 0)}
                   </span>
                 ) : null}
@@ -361,10 +362,10 @@ function FeedCard({
     <Card className="min-h-0 gap-0 rounded-lg py-0 shadow-sm shadow-foreground/[0.02] max-lg:max-h-96 lg:h-full" size="sm">
       <CardHeader className="min-h-9 gap-1 border-b px-3 py-1.5 [.border-b]:pb-1.5">
         <div className="flex min-w-0 items-center justify-between gap-2">
-          <CardTitle className="flex min-w-0 items-center gap-1.5 text-xs leading-none font-semibold">
+          <CardTitle className="flex min-w-0 items-center gap-1.5 text-[13px] font-semibold leading-none">
             <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
             <span className="min-w-0 truncate">{title}</span>
-            <Badge variant="outline" className="h-5 px-1.5 font-mono">{count}</Badge>
+            <span className="font-mono text-[11px] text-muted-foreground tabular-nums">{count}</span>
           </CardTitle>
           <Button variant="link" size="xs" className="h-5 px-1 text-xs" asChild>
             <a href={href} target="_blank" rel="noreferrer">
@@ -420,7 +421,7 @@ function FeedIssueRow({
           {item.isDraft && item.state === "open" ? (
             <span className="text-muted-foreground">Draft</span>
           ) : (
-            <span className={cn("capitalize", issueStateClassName(item.state))}>{item.state}</span>
+            <span className="capitalize">{item.state}</span>
           )}
           {item.author ? ` · ${item.author}` : ""}
           {" · "}
@@ -437,7 +438,7 @@ function FeedCommitRow({ commit }: { commit: CommitSummary }) {
       href={commit.url}
       target="_blank"
       rel="noreferrer"
-      className="grid grid-cols-[1fr_auto] items-center gap-2 rounded-md px-1.5 py-1.5 outline-none transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+      className="grid grid-cols-[1fr_auto] items-start gap-2 rounded-md px-1.5 py-1.5 outline-none transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
     >
       <span className="min-w-0">
         <span className="block truncate font-medium leading-4">{commit.message}</span>
@@ -445,7 +446,7 @@ function FeedCommitRow({ commit }: { commit: CommitSummary }) {
           {shortRepoName(commit.repo)} · {formatRelative(commit.date)}
         </span>
       </span>
-      <span className="rounded-md border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+      <span className="font-mono text-[11px] leading-4 text-muted-foreground tabular-nums">
         {commit.shortSha}
       </span>
     </a>
