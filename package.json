@@ -1,6 +1,11 @@
 {
   "name": "github-command-center",
   "version": "1.0.0",
+  "description": "A focused GitHub dashboard for repositories, PRs, issues, CI, and Actions billing.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jskoiz/github-command-center.git"
+  },
   "type": "module",
   "scripts": {
     "build": "tsc -b && vite build",

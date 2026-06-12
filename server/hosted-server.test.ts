@@ -244,6 +244,7 @@ function testRateLimiters(
     quickDashboard: createRateLimiter(overrides.quickDashboard ?? defaults),
     fullDashboard: createRateLimiter(overrides.fullDashboard ?? defaults),
     refreshDashboard: createRateLimiter(overrides.refreshDashboard ?? defaults),
+    publicDashboard: createRateLimiter(overrides.publicDashboard ?? defaults),
   }
 }
 
@@ -546,7 +547,9 @@ describe("hosted request handler", () => {
 
   it("loads public username dashboards without an OAuth session", async () => {
     await withFixture(async (fixture) => {
-      const response = await fixture.request("/api/dashboard/jskoiz?quick=1&scanLimit=12")
+      // refresh and scanLimit are ignored for anonymous requests: cache bypass
+      // and scan-window cycling stay reserved for signed-in users.
+      const response = await fixture.request("/api/dashboard/jskoiz?quick=1&scanLimit=12&refresh=1")
 
       expect(response.status).toBe(200)
       expect(header(response, "x-gcc-auth")).toBe("public")
@@ -556,7 +559,7 @@ describe("hosted request handler", () => {
         options: {
           force: false,
           quick: true,
-          scanLimit: 12,
+          scanLimit: 24,
         },
       }])
       expect(fixture.calls.dashboards).toHaveLength(0)
@@ -590,6 +593,56 @@ describe("hosted request handler", () => {
       expect(JSON.parse(blocked.body)).toEqual({ message: RATE_LIMIT_MESSAGE })
       expect(fixture.calls.publicDashboards).toHaveLength(1)
     }, { rateLimiters })
+  })
+
+  it("rate-limits public username dashboard requests per remote address across usernames", async () => {
+    const rateLimiters = testRateLimiters({
+      publicDashboard: { limit: 2, windowMs: 60_000, now: () => 0 },
+    })
+
+    await withFixture(async (fixture) => {
+      const first = await fixture.request("/api/dashboard/user-one")
+      const second = await fixture.request("/api/dashboard/user-two")
+      const blocked = await fixture.request("/api/dashboard/user-three")
+
+      expect(first.status).toBe(200)
+      expect(second.status).toBe(200)
+      expect(blocked.status).toBe(429)
+      expect(header(blocked, "retry-after")).toBe("60")
+      expect(JSON.parse(blocked.body)).toEqual({ message: RATE_LIMIT_MESSAGE })
+      expect(fixture.calls.publicDashboards).toHaveLength(2)
+    }, { rateLimiters })
+  })
+
+  it("passes through client-error messages from the public dashboard loader", async () => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/api/dashboard/jskoiz")
+
+      expect(response.status).toBe(404)
+      expect(JSON.parse(response.body)).toEqual({ message: "GitHub user not found." })
+    }, {
+      loadPublicDashboard: async () => {
+        const error = new Error("GitHub user not found.") as Error & { status: number }
+        error.status = 404
+        throw error
+      },
+    })
+  })
+
+  it("does not expose internal error details from the public dashboard loader", async () => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/api/dashboard/jskoiz")
+
+      expect(response.status).toBe(500)
+      expect(JSON.parse(response.body)).toEqual({
+        message: "Public dashboard request failed. Try again shortly.",
+      })
+      expect(fixture.logger.error).toHaveBeenCalled()
+    }, {
+      loadPublicDashboard: async () => {
+        throw new Error("connect ECONNREFUSED 10.0.0.5:443")
+      },
+    })
   })
 
   it("does not count unauthenticated dashboard requests against user buckets", async () => {

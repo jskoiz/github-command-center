@@ -21,6 +21,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { formatCompactNumber, formatRelative, shortRepoName } from "@/lib/format"
+import { repoCiStatusInput } from "@/lib/github-status"
 import { cn } from "@/lib/utils"
 import type { CommitSummary, IssueSummary, RepoSummary } from "@/types/github"
 import { StatusBadge } from "./StatusBadge"
@@ -30,7 +31,7 @@ type IssueStateFilter = "all" | "open" | "closed"
 
 function matchesPullRequestState(item: IssueSummary, filter: PullRequestStateFilter): boolean {
   if (filter === "all") return true
-  if (filter === "draft") return Boolean(item.isDraft)
+  if (filter === "draft") return Boolean(item.isDraft) && item.state === "open"
   if (filter === "open") return item.state === "open" && !item.isDraft
   return item.state === "closed"
 }
@@ -274,7 +275,7 @@ function RepoSidebar({
               >
                 <StatusBadge
                   compact
-                  state={repo.latestRun?.conclusion ?? repo.latestRun?.status ?? repo.checkState}
+                  state={repoCiStatusInput(repo)}
                   className="size-4 shrink-0 [&>svg]:size-3"
                 />
                 <span className="min-w-0 flex-1 truncate font-medium">

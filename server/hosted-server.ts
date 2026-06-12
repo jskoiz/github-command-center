@@ -25,7 +25,7 @@ const MAX_REVOKED_SESSION_IDS = 10_000
 
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline'",
+  "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: https://avatars.githubusercontent.com",
   "connect-src 'self'",
@@ -100,8 +100,17 @@ export function revokeSessionId(id: string, expiresAt: number) {
   pruneExpiredRevocations()
   if (expiresAt <= Date.now()) return
   if (!revokedSessionIds.has(id) && revokedSessionIds.size >= MAX_REVOKED_SESSION_IDS) {
-    const oldest = revokedSessionIds.keys().next().value
-    if (oldest !== undefined) revokedSessionIds.delete(oldest)
+    // Evict the revocation closest to expiring; insertion order would let a
+    // fresh revocation fall out while long-lived entries persist.
+    let soonestId: string | undefined
+    let soonestExpiry = Infinity
+    for (const [revokedId, revokedExpiresAt] of revokedSessionIds) {
+      if (revokedExpiresAt < soonestExpiry) {
+        soonestExpiry = revokedExpiresAt
+        soonestId = revokedId
+      }
+    }
+    if (soonestId !== undefined) revokedSessionIds.delete(soonestId)
   }
   revokedSessionIds.set(id, expiresAt)
 }
@@ -345,10 +354,22 @@ async function handlePublicDashboard(
   username: string
 ) {
   try {
-    const force = url.searchParams.get("refresh") === "1"
+    // Anonymous requests cannot force cache bypass or vary the scan window:
+    // refresh=1 plus scanLimit cycling would let one client trigger a full
+    // upstream fanout per request and evict the warm cache other visitors use.
+    const force = false
     const quick = url.searchParams.get("quick") === "1"
+    const remoteBucket = remoteAddressBucket(req, dependencies.trustProxy ?? false)
+    // Per-IP limit first: the per-username buckets below reset for every new
+    // username, so without this one client could iterate usernames to fan out
+    // unbounded upstream GitHub requests.
+    const ipLimit = dependencies.rateLimiters.publicDashboard.check(`public-ip:${remoteBucket}`)
+    if (!ipLimit.allowed) {
+      sendRateLimit(res, ipLimit, { authHeader: false })
+      return
+    }
     const limit = dashboardRateLimiter(dependencies.rateLimiters, { force, quick }).check(
-      `${dashboardRateLimitPrefix({ force, quick })}:public:${username.toLowerCase()}:${remoteAddressBucket(req, dependencies.trustProxy ?? false)}`
+      `${dashboardRateLimitPrefix({ force, quick })}:public:${username.toLowerCase()}:${remoteBucket}`
     )
     if (!limit.allowed) {
       sendRateLimit(res, limit, { authHeader: false })
@@ -358,14 +379,22 @@ async function handlePublicDashboard(
     const payload = await dependencies.loadPublicDashboard(username, {
       force,
       quick,
-      scanLimit: Number(url.searchParams.get("scanLimit") ?? 24),
+      scanLimit: 24,
     })
     res.setHeader("x-gcc-auth", "public")
     sendJson(res, 200, payload)
   } catch (error) {
+    // Only client errors (4xx, e.g. unknown or invalid username) carry messages
+    // safe to echo; anything else stays generic so internals never reach
+    // unauthenticated clients.
     const status = (error as { status?: number }).status
-    const message = error instanceof Error ? error.message : "Public dashboard request failed."
-    sendJson(res, status && status >= 400 && status < 600 ? status : 500, { message })
+    if (status && status >= 400 && status < 500) {
+      const message = error instanceof Error ? error.message : "Public dashboard request failed."
+      sendJson(res, status, { message })
+      return
+    }
+    dependencies.logger.error("Public dashboard request failed:", error)
+    sendJson(res, 500, { message: "Public dashboard request failed. Try again shortly." })
   }
 }
 
@@ -458,14 +487,14 @@ async function serveStatic(dependencies: HostedServerDependencies, res: ServerRe
     const body = await dependencies.readFile(filePath)
     res.statusCode = 200
     res.setHeader("Content-Type", CONTENT_TYPES[extname(filePath)] ?? "application/octet-stream")
-    if (filePath.includes("/assets/")) {
+    if (filePath.includes(`${sep}assets${sep}`)) {
       res.setHeader("Cache-Control", "public, max-age=31536000, immutable")
     } else {
       res.setHeader("Cache-Control", "no-cache")
     }
     res.end(body)
   } catch {
-    sendJson(res, 404, { message: "Not found. Run `npm run build` before starting the server." })
+    sendJson(res, 404, { message: "Not found." })
   }
 }
 

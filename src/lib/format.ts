@@ -9,12 +9,6 @@ const moneyFormatter = new Intl.NumberFormat("en", {
   currency: "USD",
   maximumFractionDigits: 2,
 })
-const dateTimeFormatter = new Intl.DateTimeFormat("en", {
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-})
 const monthFormatter = new Intl.DateTimeFormat("en", {
   month: "long",
   year: "numeric",
@@ -32,11 +26,6 @@ export function formatRelative(value: string | null): string {
   if (absSeconds < 2_592_000) return relativeFormatter.format(Math.round(diffSeconds / 86_400), "day")
   if (absSeconds < 31_536_000) return relativeFormatter.format(Math.round(diffSeconds / 2_592_000), "month")
   return relativeFormatter.format(Math.round(diffSeconds / 31_536_000), "year")
-}
-
-export function formatDateTime(value: string | null): string {
-  if (!value) return "Unknown"
-  return dateTimeFormatter.format(new Date(value))
 }
 
 export function formatNumber(value: number | null | undefined): string {

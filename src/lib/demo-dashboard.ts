@@ -8,8 +8,8 @@ import type {
   WorkflowRunSummary,
 } from "@/types/github"
 
-const OWNER = "okgithub"
-const GITHUB_BASE = "https://github.com/okgithub"
+const OWNER = "octocat"
+const GITHUB_BASE = "https://github.com/octocat"
 
 type RepoInput = {
   id: number
@@ -52,7 +52,7 @@ export function createDemoDashboard(now = Date.now()): DashboardPayload {
 function createDemoViewer(): Viewer {
   return {
     login: OWNER,
-    name: "okgithub demo",
+    name: "Demo account",
     avatarUrl: "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
     profileUrl: `${GITHUB_BASE}`,
   }
@@ -493,7 +493,7 @@ function createDemoPullRequests(now: number): IssueSummary[] {
     }, 54),
     issue(now, 15, "qa-fixtures", {
       number: 10,
-      title: "Add Helium viewport smoke checks to fixture matrix",
+      title: "Add narrow-viewport smoke checks to fixture matrix",
       state: "closed",
       author: "iris",
       labels: ["qa"],

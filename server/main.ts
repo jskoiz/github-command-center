@@ -56,3 +56,14 @@ const server = createServer(createHostedRequestHandler({
 server.listen(PORT, () => {
   console.log(`github-command-center listening on ${BASE_URL} (port ${PORT})`)
 })
+
+// In Docker, node runs as PID 1 where SIGTERM is ignored unless handled —
+// without this, `docker stop` waits out the grace period and SIGKILLs
+// mid-request.
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.on(signal, () => {
+    server.close(() => process.exit(0))
+    server.closeIdleConnections()
+    setTimeout(() => process.exit(0), 10_000).unref()
+  })
+}

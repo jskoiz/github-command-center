@@ -7,7 +7,7 @@ import type { DashboardPayload, RepoSummary, WorkflowRunSummary } from "./types/
 
 const CACHE_KEY = "github-command-center:dashboard-cache:v4:session"
 const PUBLIC_CACHE_KEY = "github-command-center:dashboard-cache:v4:public:jskoiz"
-const HIDDEN_REPOS_KEY = "github-command-center:hidden-repos"
+const HIDDEN_REPOS_KEY = "github-command-center:hidden-repos:v2:session"
 
 beforeEach(() => {
   window.history.replaceState(null, "", "/")
@@ -55,8 +55,8 @@ describe("App dashboard cache auth", () => {
 
     render(<App />)
 
-    expect(await screen.findByText("okgithub")).toBeTruthy()
-    expect(screen.getByRole("region", { name: "Repositories" }).querySelector('button[title="okgithub/command-center"]')).toBeTruthy()
+    expect(await screen.findByText("octocat")).toBeTruthy()
+    expect(screen.getByRole("region", { name: "Repositories" }).querySelector('button[title="octocat/command-center"]')).toBeTruthy()
     expect(screen.getByText("Make public profile pages the default share target")).toBeTruthy()
     expect(screen.getByText("Add demo route and homepage link")).toBeTruthy()
     expect(screen.getByText("GitHub Actions Billing")).toBeTruthy()
@@ -233,7 +233,7 @@ describe("App attention strip actions", () => {
     const search = screen.getByRole("textbox", { name: "Search repositories" }) as HTMLInputElement
     await user.type(search, "active-repo")
 
-    await user.click(screen.getByRole("button", { name: /1\s*failing workflow.*1 repo/i }))
+    await user.click(screen.getByRole("button", { name: /1\s*repo with failing CI/i }))
 
     expect(search.value).toBe("")
     expect(await findRepoButton("inactive-failing-repo")).toBeTruthy()

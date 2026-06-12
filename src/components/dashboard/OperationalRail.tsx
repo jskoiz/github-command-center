@@ -58,7 +58,6 @@ function WarningPanel({ warnings }: { warnings: DashboardWarning[] }) {
   const visible = warnings.filter((warning) => !dismissed.has(warningKey(warning)))
   const displayed = expanded ? visible : visible.slice(0, 3)
   const overflowCount = Math.max(0, visible.length - 3)
-  const hiddenCount = Math.max(0, visible.length - displayed.length)
 
   if (visible.length === 0) return null
 
@@ -94,7 +93,7 @@ function WarningPanel({ warnings }: { warnings: DashboardWarning[] }) {
             >
               {expanded
                 ? "Show fewer warnings"
-                : `Show ${hiddenCount} more ${hiddenCount === 1 ? "warning" : "warnings"}`}
+                : `Show ${overflowCount} more ${overflowCount === 1 ? "warning" : "warnings"}`}
             </Button>
           ) : null}
         </div>
@@ -193,6 +192,9 @@ function CiCard({
 }) {
   const visibleRuns = runs.filter((run) => !dismissedRunIds.has(run.id))
   const hiddenCount = runs.length - visibleRuns.length
+  const [expanded, setExpanded] = useState(false)
+  const displayedRuns = expanded ? visibleRuns : visibleRuns.slice(0, 4)
+  const overflowCount = visibleRuns.length - displayedRuns.length
 
   return (
     <Card id="ci" className="min-h-0 shrink-0 gap-0 rounded-lg py-0 shadow-sm shadow-foreground/[0.02] lg:max-h-[34vh]" size="sm">
@@ -224,7 +226,8 @@ function CiCard({
             Pulling workflow runs in the background.
           </div>
         ) : visibleRuns.length ? (
-          visibleRuns.slice(0, 4).map((run) => (
+          <>
+          {displayedRuns.map((run) => (
             <div key={run.id} className="group relative">
               <a href={run.url} target="_blank" rel="noreferrer" className="flex flex-col gap-0.5 rounded-md px-1.5 py-1 pr-7 outline-none transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40">
                 <div className="flex items-center justify-between gap-3">
@@ -249,7 +252,21 @@ function CiCard({
                 <span className="sr-only">Dismiss {run.name} failure</span>
               </Button>
             </div>
-          ))
+          ))}
+          {overflowCount > 0 || expanded ? (
+            <Button
+              variant="ghost"
+              size="xs"
+              className="w-fit self-start px-1.5 text-xs text-muted-foreground"
+              aria-expanded={expanded}
+              onClick={() => setExpanded((current) => !current)}
+            >
+              {expanded
+                ? "Show fewer runs"
+                : `Show ${overflowCount} more ${overflowCount === 1 ? "run" : "runs"}`}
+            </Button>
+          ) : null}
+          </>
         ) : (
           <div className="flex items-center gap-2 rounded-md bg-muted/40 px-2 py-2 text-sm text-muted-foreground">
             <ShieldAlertIcon className="size-4" aria-hidden="true" />

@@ -104,8 +104,20 @@ export function isGithubStatusFailure(state: GithubStatusInput): boolean {
   return classifyGithubStatus(state).rollup === "failure"
 }
 
-export function isGithubStatusSuccess(state: GithubStatusInput): boolean {
-  return classifyGithubStatus(state).rollup === "success"
+export type RepoCiStatusInput = {
+  latestRun: { status: string; conclusion: string | null } | null
+  checkState: string | null
+}
+
+// Single source of truth for a repo's CI state: the latest workflow run wins,
+// falling back to the commit check rollup. The attention strip, repo badges,
+// and the CI filter must classify identically or counts and lists diverge.
+export function repoCiStatusInput(repo: RepoCiStatusInput): GithubStatusInput {
+  return repo.latestRun?.conclusion ?? repo.latestRun?.status ?? repo.checkState
+}
+
+export function repoCiRollup(repo: RepoCiStatusInput): GithubStatusRollup {
+  return classifyGithubStatus(repoCiStatusInput(repo)).rollup
 }
 
 function normalizeGithubStatus(state: GithubStatusInput): string | null {

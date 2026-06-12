@@ -9,34 +9,29 @@ import {
 import type { ReactNode } from "react"
 
 import { formatMoney, formatNumber } from "@/lib/format"
-import { isGithubStatusFailure } from "@/lib/github-status"
+import { repoCiRollup } from "@/lib/github-status"
 import { cn } from "@/lib/utils"
-import type { BillingSummary, RepoSummary, WorkflowRunSummary } from "@/types/github"
+import type { BillingSummary, RepoSummary } from "@/types/github"
 
 export function AttentionStrip({
   repos,
-  runs,
   billing,
   detailLevel,
-  dismissedRunIds,
   onShowFailing,
   onShowPullRequests,
   onShowIssues,
 }: {
   repos: RepoSummary[]
-  runs: WorkflowRunSummary[]
   billing: BillingSummary
   detailLevel: "quick" | "full"
-  dismissedRunIds: Set<number>
   onShowFailing: () => void
   onShowPullRequests: () => void
   onShowIssues: () => void
 }) {
   const isUpdating = detailLevel === "quick"
-  const failingRuns = runs.filter(
-    (run) => !dismissedRunIds.has(run.id) && isGithubStatusFailure(run.conclusion ?? run.status)
-  )
-  const failingRepoCount = new Set(failingRuns.map((run) => run.repo)).size
+  // Counted per repo with the same classification as the Failing filter this
+  // card opens, so the number always matches the resulting list.
+  const failingRepoCount = repos.filter((repo) => repoCiRollup(repo) === "failure").length
   const prCounts = summarizeKnownCounts(repos, (repo) => repo.openPullRequests)
   const issueCounts = summarizeKnownCounts(repos, (repo) => repo.openIssues)
 
@@ -48,11 +43,11 @@ export function AttentionStrip({
           value="..."
           label="checking workflows"
         />
-      ) : failingRuns.length > 0 ? (
+      ) : failingRepoCount > 0 ? (
         <AttentionCard
           icon={<XCircleIcon className="size-4 text-destructive" aria-hidden="true" />}
-          value={formatNumber(failingRuns.length)}
-          label={`failing ${failingRuns.length === 1 ? "workflow" : "workflows"} · ${failingRepoCount} ${failingRepoCount === 1 ? "repo" : "repos"}`}
+          value={formatNumber(failingRepoCount)}
+          label={`${failingRepoCount === 1 ? "repo" : "repos"} with failing CI`}
           tone="danger"
           onClick={onShowFailing}
         />
@@ -60,7 +55,7 @@ export function AttentionStrip({
         <AttentionCard
           icon={<CheckCircle2Icon className="size-4 text-status-success" aria-hidden="true" />}
           value="0"
-          label="failing workflows"
+          label="repos with failing CI"
         />
       )}
       <AttentionCard
