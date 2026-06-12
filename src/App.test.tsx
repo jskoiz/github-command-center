@@ -29,10 +29,25 @@ describe("App dashboard cache auth", () => {
 
     expect(screen.getByRole("heading", { name: "An actual usable GitHub homepage." })).toBeTruthy()
     expect(screen.getByRole("textbox", { name: "GitHub username" })).toBeTruthy()
-    expect((screen.getByRole("button", { name: "Open public view" }) as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.getByRole("link", { name: "View demo" }).getAttribute("href")).toBe("/demo")
-    expect(screen.getByRole("link", { name: /Sign in for full view/i }).getAttribute("href")).toBe("/auth/login")
+    expect((screen.getByRole("button", { name: "Open public view" }) as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.getByRole("link", { name: "/demo" }).getAttribute("href")).toBe("/demo")
+    expect(screen.getByRole("link", { name: "sign in with GitHub" }).getAttribute("href")).toBe("/auth/login")
+    expect(screen.getByTitle("Live demo dashboard").getAttribute("src")).toBe("/demo?theme=light")
+    expect(screen.getByText("Public view, no login")).toBeTruthy()
+    expect(screen.getByText("Self-host or run local")).toBeTruthy()
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("syncs the homepage theme into the embedded demo route", async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal("fetch", vi.fn())
+
+    render(<App />)
+
+    await user.click(screen.getByRole("button", { name: "Toggle theme" }))
+
+    await waitFor(() => expect(document.documentElement.classList.contains("dark")).toBe(true))
+    expect(screen.getByTitle("Live demo dashboard").getAttribute("src")).toBe("/demo?theme=dark")
   })
 
   it("turns a valid username into a public profile form action", async () => {
@@ -44,7 +59,6 @@ describe("App dashboard cache auth", () => {
     const username = screen.getByRole("textbox", { name: "GitHub username" })
     await user.type(username, "jskoiz")
 
-    expect((screen.getByRole("button", { name: "Open public view" }) as HTMLButtonElement).disabled).toBe(false)
     expect(username.closest("form")?.getAttribute("action")).toBe("/jskoiz")
   })
 
@@ -63,6 +77,21 @@ describe("App dashboard cache auth", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it("keeps demo dashboard tabs interactive without API requests", async () => {
+    window.history.replaceState(null, "", "/demo")
+    const user = userEvent.setup()
+    const fetchMock = vi.fn()
+    vi.stubGlobal("fetch", fetchMock)
+
+    render(<App />)
+
+    await user.click(await screen.findByRole("button", { name: "Draft" }))
+
+    expect(screen.getByText("Tighten feed header wrapping on medium screens")).toBeTruthy()
+    expect(screen.queryByText("Make public profile pages the default share target")).toBeNull()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it("does not render a fresh cache when the current session is unauthorized", async () => {
     window.history.replaceState(null, "", "/dashboard")
     writeCache(createPayload({
@@ -74,7 +103,7 @@ describe("App dashboard cache auth", () => {
     render(<App />)
 
     expect(screen.queryByText("private-repo")).toBeNull()
-    expect(await screen.findByText("Sign in for full view")).toBeTruthy()
+    expect(await screen.findByText("sign in with GitHub")).toBeTruthy()
     expect(screen.queryByText("private-repo")).toBeNull()
     expect(window.sessionStorage.getItem(CACHE_KEY)).toBeNull()
   })
@@ -369,10 +398,6 @@ function createPayload(overrides: Partial<DashboardPayload> = {}): DashboardPayl
   }
 }
 
-function hideRepos(...repos: RepoSummary[]) {
-  window.localStorage.setItem(HIDDEN_REPOS_KEY, JSON.stringify(repos.map((repo) => repo.id)))
-}
-
 function repoSidebar() {
   return screen.getByRole("region", { name: "Repositories" })
 }
@@ -387,6 +412,10 @@ function findRepoButton(name: string) {
 
 function queryRepoButton(name: string) {
   return repoSidebar().querySelector(`button[title="jskoiz/${name}"]`)
+}
+
+function hideRepos(...repos: RepoSummary[]) {
+  window.localStorage.setItem(HIDDEN_REPOS_KEY, JSON.stringify(repos.map((repo) => repo.id)))
 }
 
 function repoNames() {
