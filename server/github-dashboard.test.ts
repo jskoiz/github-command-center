@@ -17,6 +17,8 @@ type GithubExecutorOptions = {
   graphqlPageSize?: number
   latestCommit?: unknown
   latestPullRequest?: unknown
+  latestCommitFailures?: unknown[]
+  latestPullRequestFailures?: unknown[]
   workflowRunsByRepo?: Record<string, unknown[]>
   workflowRunFailuresByRepo?: Record<string, unknown>
 }
@@ -28,11 +30,15 @@ function createGithubExecutor({
   graphqlPageSize,
   latestCommit = createRawCommit("Latest commit"),
   latestPullRequest = createRawPullRequest(),
+  latestCommitFailures = [],
+  latestPullRequestFailures = [],
   workflowRunsByRepo = {},
   workflowRunFailuresByRepo = {},
 }: GithubExecutorOptions = {}) {
   const calls: GhCall[] = []
   let graphqlPage = 0
+  let latestCommitAttempt = 0
+  let latestPullRequestAttempt = 0
   const executor = vi.fn(async (args: string[], endpoint: string) => {
     calls.push({ args, endpoint })
     await Promise.resolve()
@@ -87,10 +93,16 @@ function createGithubExecutor({
     }
 
     if (endpoint.endsWith("/commits?per_page=1")) {
+      const failure = latestCommitFailures[latestCommitAttempt]
+      latestCommitAttempt += 1
+      if (failure !== undefined) throw failure
       return JSON.stringify(latestCommit ? [latestCommit] : [])
     }
 
     if (endpoint.endsWith("/pulls?state=all&sort=updated&direction=desc&per_page=1")) {
+      const failure = latestPullRequestFailures[latestPullRequestAttempt]
+      latestPullRequestAttempt += 1
+      if (failure !== undefined) throw failure
       return JSON.stringify(latestPullRequest ? [latestPullRequest] : [])
     }
 
@@ -296,6 +308,66 @@ describe("getGithubDashboard request coalescing", () => {
 
     expect(calls.filter((call) => call.endpoint === "/repos/jskoiz/active-repo/commits?per_page=1")).toHaveLength(1)
     expect(calls.filter((call) => call.endpoint === "/repos/jskoiz/active-repo/pulls?state=all&sort=updated&direction=desc&per_page=1")).toHaveLength(1)
+  })
+
+  it("retries a one-sided repo-detail failure while preserving the successful field", async () => {
+    const secretError = "Commit request failed with token ghp_repo_detail_secret"
+    const { calls, executor } = createGithubExecutor({
+      repos: [createRawRepo()],
+      latestCommit: createRawCommit("Recovered commit"),
+      latestPullRequest: createRawPullRequest(),
+      latestCommitFailures: [new Error(secretError)],
+    })
+    configureGithubDashboardForTests(executor)
+
+    const partial = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const recovered = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const warningText = partial.warnings.map((warning) => warning.message).join("\n")
+
+    expect(partial.repos[0].latestCommit).toBeNull()
+    expect(partial.repos[0].latestPullRequest?.number).toBe(42)
+    expect(partial.warnings).toContainEqual({
+      area: "repo details",
+      message: "Latest commit or pull request refresh failed for 1 repositories.",
+    })
+    expect(warningText).not.toContain(secretError)
+    expect(warningText).not.toContain("ghp_repo_detail_secret")
+    expect(recovered.repos[0].latestCommit?.message).toBe("Recovered commit")
+    expect(recovered.repos[0].latestPullRequest?.number).toBe(42)
+    expect(calls.filter((call) => call.endpoint.endsWith("/commits?per_page=1"))).toHaveLength(2)
+    expect(calls.filter((call) => call.endpoint.endsWith("/pulls?state=all&sort=updated&direction=desc&per_page=1"))).toHaveLength(2)
+  })
+
+  it("retries two-sided repo-detail failures and recovers both fields", async () => {
+    const commitSecretError = "Commit request failed with token ghp_commit_secret"
+    const pullRequestSecretError = "Pull request failed with token ghp_pull_secret"
+    const { calls, executor } = createGithubExecutor({
+      repos: [createRawRepo()],
+      latestCommit: createRawCommit("Recovered commit"),
+      latestPullRequest: createRawPullRequest(),
+      latestCommitFailures: [new Error(commitSecretError)],
+      latestPullRequestFailures: [new Error(pullRequestSecretError)],
+    })
+    configureGithubDashboardForTests(executor)
+
+    const failed = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const recovered = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const warningText = failed.warnings.map((warning) => warning.message).join("\n")
+
+    expect(failed.repos[0].latestCommit).toBeNull()
+    expect(failed.repos[0].latestPullRequest).toBeNull()
+    expect(failed.warnings).toContainEqual({
+      area: "repo details",
+      message: "Latest commit or pull request refresh failed for 1 repositories.",
+    })
+    expect(warningText).not.toContain(commitSecretError)
+    expect(warningText).not.toContain(pullRequestSecretError)
+    expect(warningText).not.toContain("ghp_commit_secret")
+    expect(warningText).not.toContain("ghp_pull_secret")
+    expect(recovered.repos[0].latestCommit?.message).toBe("Recovered commit")
+    expect(recovered.repos[0].latestPullRequest?.number).toBe(42)
+    expect(calls.filter((call) => call.endpoint.endsWith("/commits?per_page=1"))).toHaveLength(2)
+    expect(calls.filter((call) => call.endpoint.endsWith("/pulls?state=all&sort=updated&direction=desc&per_page=1"))).toHaveLength(2)
   })
 
   it("skips uncached per-repo detail pulls for inactive repos", async () => {

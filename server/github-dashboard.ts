@@ -561,7 +561,8 @@ async function getPerRepoLatestDetails(
       getLatestRepoCommit(repo),
       getLatestRepoPullRequest(repo),
     ])
-    if (commitResult.status === "rejected" || pullRequestResult.status === "rejected") {
+    const refreshSucceeded = commitResult.status === "fulfilled" && pullRequestResult.status === "fulfilled"
+    if (!refreshSucceeded) {
       failedRefreshes += 1
     }
 
@@ -571,7 +572,7 @@ async function getPerRepoLatestDetails(
     }
     cache.repos[repo.fullName] = {
       ...details,
-      refreshedAt: now,
+      refreshedAt: refreshSucceeded ? now : cached?.refreshedAt ?? 0,
       activityAt,
     }
     dirty = true
