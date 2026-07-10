@@ -357,8 +357,18 @@ async function handlePublicDashboard(
   try {
     const force = url.searchParams.get("refresh") === "1"
     const quick = url.searchParams.get("quick") === "1"
-    const limit = dashboardRateLimiter(dependencies.rateLimiters, { force, quick }).check(
-      `${dashboardRateLimitPrefix({ force, quick })}:public:${username.toLowerCase()}:${remoteAddressBucket(req, dependencies.trustProxy ?? false)}`
+    const requestKind = { force, quick }
+    const remoteAddress = remoteAddressBucket(req, dependencies.trustProxy ?? false)
+    const clientLimit = publicClientDashboardRateLimiter(dependencies.rateLimiters, requestKind).check(
+      `${dashboardRateLimitPrefix(requestKind)}:public-client:${remoteAddress}`
+    )
+    if (!clientLimit.allowed) {
+      sendRateLimit(res, clientLimit, { authHeader: "public" })
+      return
+    }
+
+    const limit = dashboardRateLimiter(dependencies.rateLimiters, requestKind).check(
+      `${dashboardRateLimitPrefix(requestKind)}:public:${username.toLowerCase()}:${remoteAddress}`
     )
     if (!limit.allowed) {
       sendRateLimit(res, limit, { authHeader: "public" })
@@ -418,6 +428,15 @@ function dashboardRateLimiter(
   if (request.force) return rateLimiters.refreshDashboard
   if (request.quick) return rateLimiters.quickDashboard
   return rateLimiters.fullDashboard
+}
+
+function publicClientDashboardRateLimiter(
+  rateLimiters: HostedRateLimiters,
+  request: { force: boolean; quick: boolean }
+) {
+  if (request.force) return rateLimiters.publicClientRefreshDashboard
+  if (request.quick) return rateLimiters.publicClientQuickDashboard
+  return rateLimiters.publicClientFullDashboard
 }
 
 function dashboardRateLimitPrefix(request: { force: boolean; quick: boolean }) {

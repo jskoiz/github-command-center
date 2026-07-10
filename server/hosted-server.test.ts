@@ -244,6 +244,9 @@ function testRateLimiters(
     quickDashboard: createRateLimiter(overrides.quickDashboard ?? defaults),
     fullDashboard: createRateLimiter(overrides.fullDashboard ?? defaults),
     refreshDashboard: createRateLimiter(overrides.refreshDashboard ?? defaults),
+    publicClientQuickDashboard: createRateLimiter(overrides.publicClientQuickDashboard ?? defaults),
+    publicClientFullDashboard: createRateLimiter(overrides.publicClientFullDashboard ?? defaults),
+    publicClientRefreshDashboard: createRateLimiter(overrides.publicClientRefreshDashboard ?? defaults),
   }
 }
 
@@ -599,6 +602,46 @@ describe("hosted request handler", () => {
       expect(JSON.parse(blocked.body)).toEqual(rateLimitPayload())
       expect(fixture.calls.publicDashboards).toHaveLength(1)
     }, { rateLimiters })
+  })
+
+  it("rate-limits rotating public usernames by remote client", async () => {
+    const rateLimiters = testRateLimiters({
+      publicClientFullDashboard: { limit: 1, windowMs: 60_000, now: () => 0 },
+    })
+
+    await withFixture(async (fixture) => {
+      const allowed = await fixture.request("/api/dashboard/jskoiz")
+      const blocked = await fixture.request("/api/dashboard/octocat")
+
+      expect(allowed.status).toBe(200)
+      expect(blocked.status).toBe(429)
+      expect(header(blocked, "x-gcc-auth")).toBe("public")
+      expect(header(blocked, "retry-after")).toBe("60")
+      expect(JSON.parse(blocked.body)).toEqual(rateLimitPayload())
+      expect(fixture.calls.publicDashboards).toEqual([{
+        username: "jskoiz",
+        options: { force: false, quick: false, scanLimit: 24 },
+      }])
+    }, { rateLimiters })
+  })
+
+  it("keeps public client allowances independent by trusted remote address", async () => {
+    const rateLimiters = testRateLimiters({
+      publicClientFullDashboard: { limit: 1, windowMs: 60_000, now: () => 0 },
+    })
+
+    await withFixture(async (fixture) => {
+      const first = await fixture.request("/api/dashboard/jskoiz", {
+        headers: { "X-Forwarded-For": "203.0.113.10" },
+      })
+      const second = await fixture.request("/api/dashboard/octocat", {
+        headers: { "X-Forwarded-For": "203.0.113.11" },
+      })
+
+      expect(first.status).toBe(200)
+      expect(second.status).toBe(200)
+      expect(fixture.calls.publicDashboards).toHaveLength(2)
+    }, { rateLimiters, trustProxy: true })
   })
 
   it("returns a GitHub quota recovery payload for public dashboards", async () => {

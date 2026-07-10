@@ -47,4 +47,29 @@ describe("createRateLimiter", () => {
     expect(limiter.check("user:two")).toEqual({ allowed: true })
     expect(limiter.check("user:one")).toEqual({ allowed: false, retryAfterSeconds: 60 })
   })
+
+  it("evicts the oldest bucket without exceeding the configured maximum", () => {
+    const limiter = createRateLimiter({
+      limit: 1,
+      windowMs: 60_000,
+      maxBuckets: 2,
+      now: () => 1_000,
+    })
+
+    expect(limiter.check("user:one")).toEqual({ allowed: true })
+    expect(limiter.check("user:two")).toEqual({ allowed: true })
+    expect(limiter.bucketCount()).toBe(2)
+
+    expect(limiter.check("user:three")).toEqual({ allowed: true })
+    expect(limiter.bucketCount()).toBe(2)
+    expect(limiter.check("user:two")).toEqual({ allowed: false, retryAfterSeconds: 60 })
+    expect(limiter.check("user:one")).toEqual({ allowed: true })
+    expect(limiter.bucketCount()).toBe(2)
+  })
+
+  it("rejects invalid bucket maximums", () => {
+    expect(() => createRateLimiter({ limit: 1, windowMs: 1_000, maxBuckets: 0 })).toThrow(
+      "maxBuckets must be a positive integer."
+    )
+  })
 })
