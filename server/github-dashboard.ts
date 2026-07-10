@@ -342,7 +342,7 @@ async function loadGithubDashboard({
   const scanRepos = enrichedRepos.slice(0, scanLimit)
 
   const [repoDetails, runs, pullRequests, issues, billing] = await Promise.all([
-    getPerRepoLatestDetails(enrichedRepos, warnings, now),
+    getPerRepoLatestDetails(enrichedRepos, scanRepos, warnings, now),
     getWorkflowRuns(scanRepos, warnings),
     getSearchItems(`is:pr involves:${viewer.login} archived:false`, true, warnings),
     getSearchItems(`is:issue involves:${viewer.login} archived:false`, false, warnings),
@@ -535,17 +535,26 @@ function flattenRepoPages(pages: unknown[]): RawRepo[] {
 
 async function getPerRepoLatestDetails(
   repos: RepoSummary[],
+  refreshRepos: RepoSummary[],
   warnings: DashboardWarning[],
   now: number
 ): Promise<Map<string, RepoLatestDetails>> {
   const cache = await loadRepoDetailsCache()
+  const refreshRepoNames = new Set(refreshRepos.map((repo) => repo.fullName))
   const detailsByRepo = new Map<string, RepoLatestDetails>()
   let dirty = false
   let failedRefreshes = 0
+  let activeReposOutsideRefreshScope = 0
 
   await mapLimit(repos, 4, async (repo) => {
     const cached = cache.repos[repo.fullName]
     const activityAt = getRepoActivityAt(repo)
+
+    if (!refreshRepoNames.has(repo.fullName)) {
+      if (isRecentlyActive(activityAt, now)) activeReposOutsideRefreshScope += 1
+      detailsByRepo.set(repo.fullName, cached ? toRepoLatestDetails(cached) : emptyRepoLatestDetails())
+      return
+    }
 
     if (cached && now - cached.refreshedAt < REPO_DETAILS_CACHE_MS) {
       detailsByRepo.set(repo.fullName, toRepoLatestDetails(cached))
@@ -587,6 +596,13 @@ async function getPerRepoLatestDetails(
     warnings.push({
       area: "repo details",
       message: `Latest commit or pull request refresh failed for ${failedRefreshes} repositories.`,
+    })
+  }
+
+  if (activeReposOutsideRefreshScope > 0) {
+    warnings.push({
+      area: "repo details",
+      message: `Latest commit and pull request refresh is limited to ${refreshRepos.length} of ${repos.length} repositories; active repositories outside the live refresh scope: ${activeReposOutsideRefreshScope}.`,
     })
   }
 

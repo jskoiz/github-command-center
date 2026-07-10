@@ -370,6 +370,49 @@ describe("getGithubDashboard request coalescing", () => {
     expect(calls.filter((call) => call.endpoint.endsWith("/pulls?state=all&sort=updated&direction=desc&per_page=1"))).toHaveLength(2)
   })
 
+  it("bounds cold repo-detail fanout to the workflow scan set", async () => {
+    const activeAt = new Date().toISOString()
+    const repos = createRawRepos(10, { pushed_at: activeAt, updated_at: activeAt })
+    const { calls, executor } = createGithubExecutor({ repos })
+    configureGithubDashboardForTests(executor)
+
+    const payload = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const detailWarnings = payload.warnings.filter((warning) => warning.area === "repo details")
+
+    expect(payload.repos).toHaveLength(10)
+    expect(calls.filter((call) => call.endpoint.endsWith("/commits?per_page=1"))).toHaveLength(8)
+    expect(calls.filter((call) => call.endpoint.endsWith("/pulls?state=all&sort=updated&direction=desc&per_page=1"))).toHaveLength(8)
+    expect(detailWarnings).toContainEqual({
+      area: "repo details",
+      message: "Latest commit and pull request refresh is limited to 8 of 10 repositories; active repositories outside the live refresh scope: 2.",
+    })
+    expect(detailWarnings.map((warning) => warning.message).join("\n")).not.toContain("jskoiz/repo-")
+  })
+
+  it("preserves cached repo details outside a narrower refresh set", async () => {
+    const activeAt = new Date().toISOString()
+    const repos = createRawRepos(9, { pushed_at: activeAt, updated_at: activeAt })
+    const { calls, executor } = createGithubExecutor({
+      repos,
+      latestCommit: createRawCommit("Cached out-of-scope commit"),
+      latestPullRequest: createRawPullRequest(),
+    })
+    configureGithubDashboardForTests(executor)
+
+    await getGithubDashboard({ force: true, scanLimit: 9 })
+    const payload = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const outOfScopeRepo = payload.repos.find((repo) => repo.fullName === "jskoiz/repo-9")
+
+    expect(outOfScopeRepo?.latestCommit?.message).toBe("Cached out-of-scope commit")
+    expect(outOfScopeRepo?.latestPullRequest?.number).toBe(42)
+    expect(calls.filter((call) => call.endpoint.endsWith("/commits?per_page=1"))).toHaveLength(9)
+    expect(calls.filter((call) => call.endpoint.endsWith("/pulls?state=all&sort=updated&direction=desc&per_page=1"))).toHaveLength(9)
+    expect(payload.warnings).toContainEqual({
+      area: "repo details",
+      message: "Latest commit and pull request refresh is limited to 8 of 9 repositories; active repositories outside the live refresh scope: 1.",
+    })
+  })
+
   it("skips uncached per-repo detail pulls for inactive repos", async () => {
     const { calls, executor } = createGithubExecutor({
       repos: [createRawRepo({

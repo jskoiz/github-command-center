@@ -142,12 +142,14 @@ preview command can still fetch live GitHub data.
   or public profile.
 - Cold starts first request a bounded quick payload, then load full details in
   the background.
-- Workflow-run scans default to the 24 most recently pushed repositories. The
-  `scanLimit` API parameter is clamped to 8-60.
-- Latest commit and latest pull request fields are fetched per repo and
-  refreshed at most once per day for repos active in the last week. Local mode
-  persists them to `.cache/github-command-center/repo-details.json`; hosted
-  mode keeps them in memory.
+- Workflow-run scans and live latest commit/pull request refreshes default to
+  the 24 most recently pushed repositories. The shared `scanLimit` API
+  parameter is clamped to 8-60.
+- Latest commit and latest pull request fields are refreshed at most once per
+  day for in-scope repos active in the last week. Rows outside the live refresh
+  scope retain valid cached details when available. Local mode persists them to
+  `.cache/github-command-center/repo-details.json`; hosted mode keeps them in
+  memory.
 - The browser stores the latest full dashboard payload in source-scoped storage,
   considered fresh for 10 minutes.
 
