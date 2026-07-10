@@ -347,6 +347,65 @@ describe("hosted request handler", () => {
     })
   })
 
+  it("serves static HEAD metadata without reading the file and leaves GET unchanged", async () => {
+    await withFixture(async (fixture) => {
+      const head = await fixture.request("/assets/app.js", { method: "HEAD" })
+
+      expect(head.status).toBe(200)
+      expect(head.body).toBe("")
+      expect(header(head, "content-type")).toBe("text/javascript; charset=utf-8")
+      expect(header(head, "cache-control")).toBe("public, max-age=31536000, immutable")
+      expect(fixture.calls.staticStats).toEqual([`${DIST_DIR}/assets/app.js`])
+      expect(fixture.calls.staticReads).toEqual([])
+
+      const get = await fixture.request("/assets/app.js")
+
+      expect(get.status).toBe(200)
+      expect(get.body).toBe("console.log('ok')")
+      expect(header(get, "content-type")).toBe(header(head, "content-type"))
+      expect(header(get, "cache-control")).toBe(header(head, "cache-control"))
+      expect(fixture.calls.staticReads).toEqual([`${DIST_DIR}/assets/app.js`])
+    }, {
+      readFile: async () => Buffer.from("console.log('ok')"),
+    })
+  })
+
+  it("returns 404 for static HEAD when the SPA fallback is absent", async () => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/missing", { method: "HEAD" })
+
+      expect(response.status).toBe(404)
+      expect(response.body).toBe("")
+      expect(fixture.calls.staticStats).toEqual([
+        `${DIST_DIR}/missing`,
+        `${DIST_DIR}/index.html`,
+      ])
+      expect(fixture.calls.staticReads).toEqual([])
+    }, {
+      stat: async () => {
+        throw new Error("not found")
+      },
+    })
+  })
+
+  it("verifies directory indexes for static HEAD without reading them", async () => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/docs", { method: "HEAD" })
+
+      expect(response.status).toBe(200)
+      expect(response.body).toBe("")
+      expect(header(response, "content-type")).toBe("text/html; charset=utf-8")
+      expect(header(response, "cache-control")).toBe("no-cache")
+      expect(fixture.calls.staticStats).toEqual([
+        `${DIST_DIR}/docs`,
+        `${DIST_DIR}/docs/index.html`,
+      ])
+      expect(fixture.calls.staticReads).toEqual([])
+    }, {
+      stat: async (path) => ({ isDirectory: () => path.endsWith("/docs") }),
+    })
+  })
+
   it("keeps traversal attempts inside the injected static root", async () => {
     await withFixture(async (fixture) => {
       const response = await fixture.request("/../../etc/passwd")
@@ -840,6 +899,48 @@ describe("hosted request handler", () => {
       expect(header(response, "allow")).toBe("GET, HEAD")
       expect(JSON.parse(response.body)).toEqual({ message: "Method not allowed." })
     })
+  })
+
+  it("rejects dashboard and auth HEAD requests before work or limiter consumption", async () => {
+    const rateLimiters = testRateLimiters({
+      auth: { limit: 1, windowMs: 60_000, now: () => 0 },
+      fullDashboard: { limit: 1, windowMs: 60_000, now: () => 0 },
+      publicClientFullDashboard: { limit: 1, windowMs: 60_000, now: () => 0 },
+    })
+
+    await withFixture(async (fixture) => {
+      const sessionCookie = sessionCookieHeader(fixture.sessionKey)
+      const headRequests = await Promise.all([
+        fixture.request("/auth/login", { method: "HEAD" }),
+        fixture.request("/auth/callback?code=code-123&state=known", {
+          method: "HEAD",
+          headers: { Cookie: `${STATE_COOKIE}=known` },
+        }),
+        fixture.request("/auth/logout", { method: "HEAD", headers: { Cookie: sessionCookie } }),
+        fixture.request("/api/dashboard", { method: "HEAD", headers: { Cookie: sessionCookie } }),
+        fixture.request("/api/dashboard/jskoiz", { method: "HEAD" }),
+      ])
+
+      for (const response of headRequests) {
+        expect(response.status).toBe(405)
+        expect(header(response, "allow")).toBe("GET")
+        expect(response.body).toBe("")
+      }
+      expect(fixture.calls.exchanges).toEqual([])
+      expect(fixture.calls.revocations).toEqual([])
+      expect(fixture.calls.dashboards).toEqual([])
+      expect(fixture.calls.publicDashboards).toEqual([])
+
+      const login = await fixture.request("/auth/login")
+      const dashboard = await fixture.request("/api/dashboard", { headers: { Cookie: sessionCookie } })
+      const publicDashboard = await fixture.request("/api/dashboard/jskoiz")
+
+      expect(login.status).toBe(302)
+      expect(dashboard.status).toBe(200)
+      expect(publicDashboard.status).toBe(200)
+      expect(fixture.calls.dashboards).toHaveLength(1)
+      expect(fixture.calls.publicDashboards).toHaveLength(1)
+    }, { rateLimiters })
   })
 
   it("sets security headers on every response", async () => {

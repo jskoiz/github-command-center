@@ -151,6 +151,12 @@ async function handleRequest(
     return
   }
 
+  if (req.method === "HEAD" && isDashboardOrAuthPath(url.pathname)) {
+    res.setHeader("Allow", "GET")
+    sendJson(res, 405, { message: "Method not allowed." })
+    return
+  }
+
   if (url.pathname === "/auth/login") return handleLogin(dependencies, baseUrl, req, res)
   if (url.pathname === "/auth/callback") return handleCallback(dependencies, baseUrl, req, res, url)
   if (url.pathname === "/auth/logout") return handleLogout(dependencies, req, res)
@@ -162,7 +168,15 @@ async function handleRequest(
     return
   }
 
-  return serveStatic(dependencies, res, url.pathname)
+  return serveStatic(dependencies, res, url.pathname, req.method === "HEAD")
+}
+
+function isDashboardOrAuthPath(pathname: string) {
+  return pathname === "/auth/login"
+    || pathname === "/auth/callback"
+    || pathname === "/auth/logout"
+    || pathname === "/api/dashboard"
+    || /^\/api\/dashboard\/[^/]+$/.test(pathname)
 }
 
 function handleLogin(
@@ -503,11 +517,17 @@ function sendExpiredSession(dependencies: HostedServerDependencies, res: ServerR
   )
 }
 
-async function serveStatic(dependencies: HostedServerDependencies, res: ServerResponse, pathname: string) {
+async function serveStatic(
+  dependencies: HostedServerDependencies,
+  res: ServerResponse,
+  pathname: string,
+  headOnly: boolean
+) {
   const staticRoot = normalizeStaticRoot(dependencies.distDir)
   const requested = pathname === "/" ? "/index.html" : pathname
   const safePath = normalize(requested).replace(/^(\.\.[/\\])+/, "")
   let filePath = join(staticRoot, safePath)
+  let finalPathVerified = false
   if (filePath !== staticRoot && !filePath.startsWith(staticRoot + sep)) {
     sendJson(res, 403, { message: "Forbidden." })
     return
@@ -516,23 +536,43 @@ async function serveStatic(dependencies: HostedServerDependencies, res: ServerRe
   try {
     const stats = await dependencies.stat(filePath)
     if (stats.isDirectory()) filePath = join(filePath, "index.html")
+    else finalPathVerified = true
   } catch {
     // SPA fallback: unknown paths render the app shell.
     filePath = join(staticRoot, "index.html")
   }
 
+  if (headOnly) {
+    if (!finalPathVerified) {
+      try {
+        await dependencies.stat(filePath)
+      } catch {
+        sendJson(res, 404, { message: "Not found. Run `npm run build` before starting the server." })
+        return
+      }
+    }
+    res.statusCode = 200
+    applyStaticRepresentationHeaders(res, filePath)
+    res.end()
+    return
+  }
+
   try {
     const body = await dependencies.readFile(filePath)
     res.statusCode = 200
-    res.setHeader("Content-Type", CONTENT_TYPES[extname(filePath)] ?? "application/octet-stream")
-    if (filePath.includes("/assets/")) {
-      res.setHeader("Cache-Control", "public, max-age=31536000, immutable")
-    } else {
-      res.setHeader("Cache-Control", "no-cache")
-    }
+    applyStaticRepresentationHeaders(res, filePath)
     res.end(body)
   } catch {
     sendJson(res, 404, { message: "Not found. Run `npm run build` before starting the server." })
+  }
+}
+
+function applyStaticRepresentationHeaders(res: ServerResponse, filePath: string) {
+  res.setHeader("Content-Type", CONTENT_TYPES[extname(filePath)] ?? "application/octet-stream")
+  if (filePath.includes("/assets/")) {
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable")
+  } else {
+    res.setHeader("Cache-Control", "no-cache")
   }
 }
 
