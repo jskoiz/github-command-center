@@ -321,18 +321,18 @@ async function handleDashboard(
   res: ServerResponse,
   request: DashboardRequestOptions
 ) {
+  if (!isOAuthConfigured(dependencies)) {
+    res.setHeader("x-gcc-auth", "oauth")
+    sendJson(res, 401, oauthUnavailablePayload())
+    return
+  }
+
   const cookies = parseCookies(req.headers.cookie)
   const session = cookies[SESSION_COOKIE] ? openSession(cookies[SESSION_COOKIE], dependencies.sessionKey) : null
 
   if (!session) {
     res.setHeader("x-gcc-auth", "oauth")
-    sendJson(
-      res,
-      401,
-      isOAuthConfigured(dependencies)
-        ? { message: "Sign in with GitHub to load the dashboard.", loginUrl: "/auth/login" }
-        : oauthUnavailablePayload()
-    )
+    sendJson(res, 401, { message: "Sign in with GitHub to load the dashboard.", loginUrl: "/auth/login" })
     return
   }
 

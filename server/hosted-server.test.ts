@@ -643,6 +643,21 @@ describe("hosted request handler", () => {
     }, { clientId: "", clientSecret: "" })
   })
 
+  it("rejects signed session cookies when OAuth is not configured", async () => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/api/dashboard", {
+        headers: { Cookie: sessionCookieHeader(fixture.sessionKey) },
+      })
+
+      expect(response.status).toBe(401)
+      expect(header(response, "x-gcc-auth")).toBe("oauth")
+      expect(JSON.parse(response.body)).toEqual({
+        message: "GitHub OAuth is not configured. Open /:username to view a public profile dashboard.",
+      })
+      expect(fixture.calls.dashboards).toHaveLength(0)
+    }, { clientId: "", clientSecret: "" })
+  })
+
   it("loads public username dashboards without an OAuth session", async () => {
     await withFixture(async (fixture) => {
       const response = await fixture.request("/api/dashboard/jskoiz?quick=1&scanLimit=12")

@@ -18,6 +18,7 @@ dist-ssr
 # Local app/runtime cache
 .vite
 .cache
+.wrangler
 .vercel
 .netlify
 

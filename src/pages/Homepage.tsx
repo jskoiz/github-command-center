@@ -12,6 +12,7 @@ const X_URL = "https://x.com/jskoiz"
 const DASHBOARD_PREVIEW_WIDTH = 1240
 const DASHBOARD_PREVIEW_HEIGHT = 620
 const DEMO_PREVIEW_VERSION = "stripless"
+const PUBLIC_DEPLOYMENT = import.meta.env.VITE_PUBLIC_DEPLOYMENT === "1"
 
 export function Homepage({
   theme,
@@ -82,11 +83,17 @@ export function Homepage({
                 </Button>
               </form>
               <p className="mt-3 text-[13px] leading-[1.5] font-normal text-muted-foreground">
-                Or{" "}
-                <a href="/auth/login" className="font-medium underline underline-offset-3">
-                  sign in with GitHub
-                </a>{" "}
-                for private repos, workflow runs, and billing.
+                {PUBLIC_DEPLOYMENT ? (
+                  <>Private dashboards are available when you self-host with GitHub OAuth.</>
+                ) : (
+                  <>
+                    Or{" "}
+                    <a href="/auth/login" className="font-medium underline underline-offset-3">
+                      sign in with GitHub
+                    </a>{" "}
+                    for private repos, workflow runs, and billing.
+                  </>
+                )}
               </p>
             </div>
           </section>
@@ -110,13 +117,13 @@ export function Homepage({
 
           <section className="mt-[60px] grid grid-cols-1 gap-9 min-[860px]:grid-cols-3">
             <HomepageFeature title="Public view, no login">
-              Any profile is a dashboard: <code className="rounded-[5px] bg-muted px-1.5 py-0.5 font-mono text-[12px] leading-none font-medium text-foreground">okgithub.com/username</code> shows public PRs, issues, commits, CI, and repos instantly.
+              Any profile is a dashboard: <code className="rounded-[5px] bg-muted px-1.5 py-0.5 font-mono text-[12px] leading-none font-medium text-foreground">/username</code> shows public PRs, issues, commits, CI, and repos instantly.
             </HomepageFeature>
-            <HomepageFeature title="Sign in for everything">
-              GitHub OAuth unlocks private repos, workflow runs, Actions billing — everything your token can read.
+            <HomepageFeature title={PUBLIC_DEPLOYMENT ? "Private mode when self-hosted" : "Sign in for everything"}>
+              GitHub OAuth unlocks private repos, workflow runs, and Actions billing on a standalone deployment.
             </HomepageFeature>
             <HomepageFeature title="Self-host or run local">
-              Open source. Run it on your machine against the <code className="rounded-[5px] bg-muted px-1.5 py-0.5 font-mono text-[12px] leading-none font-medium text-foreground">gh</code> CLI, or deploy the hosted server anywhere a container runs.
+              Open source. Run it on your machine against the <code className="rounded-[5px] bg-muted px-1.5 py-0.5 font-mono text-[12px] leading-none font-medium text-foreground">gh</code> CLI, or deploy to Cloudflare Workers or any Node host.
             </HomepageFeature>
           </section>
         </main>
