@@ -7,4 +7,6 @@ coverage
 .env
 .env.*
 !.env.example
-plans
+docs
+AGENTS.md
+README.md

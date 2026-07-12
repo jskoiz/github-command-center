@@ -33,11 +33,14 @@ afterEach(() => {
 describe("session cookies", () => {
   it("round-trips a sealed session", () => {
     const key = createKey()
+    const now = Date.parse("2026-06-11T12:00:00Z")
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
     const session: Session = {
       id: "session-id",
       token: "gho_token",
       login: "jskoiz",
-      issuedAt: Date.parse("2026-06-11T12:00:00Z"),
+      issuedAt: now,
     }
 
     const value = sealSession(session, key)

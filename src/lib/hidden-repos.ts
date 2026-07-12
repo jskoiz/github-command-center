@@ -1,9 +1,9 @@
-const HIDDEN_REPOS_STORAGE_KEY = "github-command-center:hidden-repos"
+const HIDDEN_REPOS_STORAGE_KEY_PREFIX = "github-command-center:hidden-repos:v2"
 
-export function loadHiddenRepos(): Set<number> {
+export function loadHiddenRepos(scope: string): Set<number> {
   if (typeof window === "undefined") return new Set()
   try {
-    const raw = window.localStorage.getItem(HIDDEN_REPOS_STORAGE_KEY)
+    const raw = window.localStorage.getItem(storageKey(scope))
     const parsed = raw ? JSON.parse(raw) as unknown : []
     if (!Array.isArray(parsed)) return new Set()
     return new Set(parsed.filter((value): value is number => typeof value === "number"))
@@ -12,10 +12,14 @@ export function loadHiddenRepos(): Set<number> {
   }
 }
 
-export function saveHiddenRepos(ids: Set<number>) {
+export function saveHiddenRepos(scope: string, ids: Set<number>) {
   try {
-    window.localStorage.setItem(HIDDEN_REPOS_STORAGE_KEY, JSON.stringify([...ids]))
+    window.localStorage.setItem(storageKey(scope), JSON.stringify([...ids]))
   } catch {
     // Hidden repos are best-effort; failing to persist only affects the next reload.
   }
+}
+
+function storageKey(scope: string) {
+  return `${HIDDEN_REPOS_STORAGE_KEY_PREFIX}:${scope}`
 }

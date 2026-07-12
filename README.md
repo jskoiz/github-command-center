@@ -1,157 +1,119 @@
 # GitHub Command Center
 
-A focused GitHub homepage: PRs, issues, commits, CI status, workflow failures,
-and GitHub Actions billing in one dense activity view, with repositories kept
-as a slim sidebar for scoping the activity columns.
+A focused GitHub homepage for pull requests, issues, commits, CI failures, and
+Actions billing across all your repositories.
 
-The root page is a minimal entrypoint: enter a GitHub username to open a public
-dashboard at `/username` with no login, open `/demo` for a mock-data tour, or
-sign in to open the full dashboard at `/dashboard`.
+The root page opens public dashboards at `/username`, a fixture-backed tour at
+`/demo`, or the private dashboard at `/dashboard`. Hidden repositories and
+dismissed workflow failures persist in the browser.
 
-Repos you don't care about can be hidden, noisy CI failures dismissed, and
-everything persists in the browser.
+## Runtime modes
 
-It runs in two modes:
-
-| Mode | Auth | Best for |
+| Mode | Authentication | Best for |
 | --- | --- | --- |
-| **Local** (`npm run dev`) | Your authenticated GitHub CLI (`gh`) | Personal use on your machine |
-| **Hosted public** (`npm start`) | None for `/username` routes | Public profile dashboards like `/jskoiz` |
-| **Hosted OAuth** (`npm start`) | GitHub OAuth sign-in | `/dashboard` with private repo metadata, Actions billing, and signed-in data |
+| Local Vite | Authenticated GitHub CLI | Personal use on one machine |
+| Hosted public | None for `/username` | Shareable public profiles |
+| Hosted OAuth | GitHub OAuth | Private repositories and billing |
 
-## Local mode
+The project supports Node.js 24 LTS only. `.nvmrc` and the Docker image pin the
+same runtime.
 
-Requirements: Node.js 22.18+, npm, and the GitHub CLI authenticated as the
-account you want to inspect.
+## Local development
+
+Requirements: Node.js 24.18.0, npm, and an authenticated GitHub CLI.
 
 ```sh
-gh auth status                          # check auth
-gh auth refresh -h github.com -s user   # billing needs the user scope
-npm install
+nvm use
+gh auth status
+gh auth refresh -h github.com -s user # required for Actions billing
+npm ci
 npm run dev
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173) for the landing page,
-[http://127.0.0.1:5173/demo](http://127.0.0.1:5173/demo) for the mock-data
-demo, or [http://127.0.0.1:5173/dashboard](http://127.0.0.1:5173/dashboard)
-for the full local dashboard. If `gh` is not on PATH, set `GH_BIN` (see
-[.env.example](./.env.example)). The local API only answers requests from
-localhost.
+Open [the landing page](http://127.0.0.1:5173),
+[the demo](http://127.0.0.1:5173/demo), or
+[the local dashboard](http://127.0.0.1:5173/dashboard).
+
+The local API accepts loopback requests only. Vite does not load unprefixed
+`.env` values into its Node process; pass local overrides in the command shell:
+
+```sh
+GH_BIN=/absolute/path/to/gh npm run dev
+```
 
 ## Hosted mode
 
-The standalone server (`server/main.ts`) serves the built app. Public profile
-routes such as `/jskoiz` require no login and use public GitHub REST data.
-OAuth is optional and enables the signed-in `/dashboard` view, private repo
-metadata, GraphQL-only rollups, and Actions billing. Signed-in tokens live in an
-encrypted httpOnly cookie, never on disk.
+`server/main.ts` serves the built client and hosted APIs. Public `/username`
+routes use public GitHub REST data without login. Set `GITHUB_PUBLIC_TOKEN` to
+raise GitHub's anonymous quota without exposing the token to visitors.
 
-Public profile routes can run anonymously, but GitHub's anonymous REST bucket is
-small. Set `GITHUB_PUBLIC_TOKEN` on the server to raise that limit without
-requiring visitors to log in. The server intentionally does not reuse
-`GITHUB_TOKEN` or `GH_TOKEN` for public pages; hosted deployments must set the
-explicit public token when they need more than anonymous quota. If OAuth is
-configured and the public quota is exhausted, visitors see a sign-in action so
-they can retry with their own GitHub API quota.
+OAuth is optional. It enables `/dashboard`, private repository metadata,
+GraphQL-only rollups, workflow runs, and Actions billing. Create a GitHub OAuth
+App with `${BASE_URL}/auth/callback` as its callback URL, then configure:
 
-1. Configure the public deployment URL:
+```sh
+BASE_URL=https://gcc.example.com
+PORT=3000
+GITHUB_PUBLIC_TOKEN=...
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
+SESSION_SECRET=... # openssl rand -hex 32
+```
 
-   ```sh
-   BASE_URL=https://gcc.example.com
-   PORT=3000
-   GITHUB_PUBLIC_TOKEN=...
-   ```
+`npm start` loads `.env` when it exists. Process environment variables take
+precedence. OAuth deployments must use HTTPS; hosted tokens are stored in an
+encrypted, httpOnly cookie.
 
-2. Optional: create a **GitHub OAuth App** at <https://github.com/settings/developers>:
-   - Homepage URL: your deployment URL (e.g. `https://gcc.example.com`)
-   - Authorization callback URL: `https://gcc.example.com/auth/callback`
-3. Optional: add OAuth environment variables (see [.env.example](./.env.example)):
+Build and start:
 
-   ```sh
-   GITHUB_CLIENT_ID=...
-   GITHUB_CLIENT_SECRET=...
-   SESSION_SECRET=$(openssl rand -hex 32)
-   ```
+```sh
+npm ci
+npm run build
+npm start
+curl --fail http://127.0.0.1:3000/healthz
+```
 
-4. Build and start:
+Set `TRUST_PROXY=1` only behind a trusted reverse proxy. See `.env.example` for
+the complete environment contract.
 
-   ```sh
-   npm ci
-   npm run build
-   npm start
-   ```
-
-The OAuth flow requests the `repo` and `user` scopes (private repo metadata,
-workflow runs, and Actions billing). Run OAuth deployments behind HTTPS;
-cookies are marked `Secure` automatically when `BASE_URL` starts with `https://`.
-
-Logout clears the local session, records the session id as revoked for the
-remaining cookie lifetime, and attempts to revoke the GitHub OAuth token.
-In-memory session revocations are process-local, so a server restart clears the
-local revocation list but not a successful GitHub token revocation.
-Hosted OAuth and dashboard requests also use process-local request throttles to
-limit repeated sign-in attempts and expensive dashboard fanout.
-
-### Docker
+## Docker
 
 ```sh
 docker build -t github-command-center .
-docker run -p 3000:3000 \
-  -e BASE_URL=https://gcc.example.com \
+docker run --rm -p 3000:3000 \
+  -e BASE_URL=http://127.0.0.1:3000 \
   -e GITHUB_PUBLIC_TOKEN=... \
   github-command-center
 ```
 
-Add `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, and `SESSION_SECRET` to the
-container only when enabling OAuth sign-in.
-
-Works as-is on any host that runs a container or a Node process (Fly.io,
-Railway, Render, a VPS). Point `BASE_URL` at the public URL, and point the OAuth
-callback there if OAuth is enabled.
+Add the three OAuth variables only when enabling sign-in. The container exposes
+and health-checks `/healthz`.
 
 ## Verify
 
 ```sh
 npm run check
+npm audit --audit-level=high
 ```
 
-This runs lint, an artifact-free TypeScript check, tests, then a production
-build. For faster local loops:
-
-```sh
-npm run typecheck
-npm run test
-```
-
-Preview the built app locally (local `gh` mode):
-
-```sh
-npm run build
-npm run preview
-```
-
-The Vite middleware serves `/api/dashboard` in both `dev` and `preview`, so the
-preview command can still fetch live GitHub data.
+The required gate runs lint, dead-code analysis, browser and server tests in
+their real environments, typechecking, a production build, and a dependency-free
+hosted health smoke. Focused commands and the container gate are documented in
+[`docs/HARNESS.md`](./docs/HARNESS.md).
 
 ## Data and caching
 
-- Local mode calls `gh api`; hosted OAuth mode calls the GitHub REST/GraphQL
-  APIs directly with the signed-in user's OAuth token; hosted public mode calls
-  public GitHub REST APIs anonymously or with `GITHUB_PUBLIC_TOKEN` when set.
-- The server keeps a short in-memory cache (5 min full / 1 min quick) per user
-  or public profile.
-- Cold starts first request a bounded quick payload, then load full details in
-  the background.
-- Workflow-run scans and live latest commit/pull request refreshes default to
-  the 24 most recently pushed repositories. The shared `scanLimit` API
-  parameter is clamped to 8-60.
-- Latest commit and latest pull request fields are refreshed at most once per
-  day for in-scope repos active in the last week. Rows outside the live refresh
-  scope retain valid cached details when available. Local mode persists them to
-  `.cache/github-command-center/repo-details.json`; hosted mode keeps them in
-  memory.
-- The browser stores the latest full dashboard payload in source-scoped storage,
-  considered fresh for 10 minutes.
+- Local mode uses `gh api`; hosted OAuth uses the signed-in token; public routes
+  use only `GITHUB_PUBLIC_TOKEN` or anonymous GitHub REST.
+- Full and quick server payloads use short process-local caches.
+- Repository detail refreshes are bounded by `scanLimit` and retained for one
+  day. Only local mode persists those details under `.cache/`.
+- Browser payloads are source-scoped in session storage and expire after ten
+  minutes.
+- Partial upstream results remain visible through dashboard warnings.
+
+See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for ownership, security
+boundaries, cache invariants, and migration triggers.
 
 ## License
 

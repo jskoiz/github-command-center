@@ -23,6 +23,7 @@ import {
   type RateLimitOptions,
 } from "./rate-limit.ts"
 import { deriveSessionKey, openSession, sealSession, type Session } from "./session.ts"
+import type { DashboardPayload } from "../src/types/github.ts"
 
 type OAuthExchangeOptions = Parameters<HostedServerDependencies["exchangeOAuthCode"]>[0]
 type OAuthRevocationOptions = Parameters<HostedServerDependencies["revokeOAuthToken"]>[0]
@@ -74,6 +75,34 @@ type Fixture = {
 
 const BASE_URL = "http://127.0.0.1"
 const DIST_DIR = "/tmp/github-command-center-dist"
+const DASHBOARD_PAYLOAD: DashboardPayload = {
+  generatedAt: "2026-07-12T00:00:00.000Z",
+  detailLevel: "quick",
+  scanLimit: 24,
+  viewer: {
+    login: "jskoiz",
+    name: "saburo",
+    avatarUrl: "https://example.com/avatar.png",
+    profileUrl: "https://github.com/jskoiz",
+  },
+  repos: [],
+  recentCommits: [],
+  pullRequests: [],
+  issues: [],
+  ciRuns: [],
+  billing: {
+    available: false,
+    year: 2026,
+    month: 7,
+    grossAmount: 0,
+    discountAmount: 0,
+    netAmount: 0,
+    unitTotals: [],
+    skus: [],
+    repositories: [],
+  },
+  warnings: [],
+}
 let sessionCounter = 0
 
 afterEach(() => {
@@ -116,11 +145,11 @@ async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
     rateLimiters: options.rateLimiters ?? createHostedRateLimiters(),
     loadDashboard: options.loadDashboard ?? (async (dashboardOptions) => {
       calls.dashboards.push(dashboardOptions)
-      return { ok: true }
+      return DASHBOARD_PAYLOAD
     }),
     loadPublicDashboard: options.loadPublicDashboard ?? (async (username, dashboardOptions) => {
       calls.publicDashboards.push({ username, options: dashboardOptions })
-      return { ok: true, username }
+      return DASHBOARD_PAYLOAD
     }),
     readFile: async (path) => {
       calls.staticReads.push(path)
@@ -620,7 +649,7 @@ describe("hosted request handler", () => {
 
       expect(response.status).toBe(200)
       expect(header(response, "x-gcc-auth")).toBe("public")
-      expect(JSON.parse(response.body)).toEqual({ ok: true, username: "jskoiz" })
+      expect(JSON.parse(response.body)).toEqual(DASHBOARD_PAYLOAD)
       expect(fixture.calls.publicDashboards).toEqual([{
         username: "jskoiz",
         options: {
@@ -633,13 +662,29 @@ describe("hosted request handler", () => {
     })
   })
 
+  it.each([
+    ["/api/dashboard/-invalid", "Invalid GitHub username."],
+    ["/api/dashboard/%", "Invalid GitHub username encoding."],
+    ["/api/dashboard?scanLimit=8.5", "scanLimit must be an integer from 8 to 60."],
+    ["/api/dashboard/jskoiz?scanLimit=61", "scanLimit must be an integer from 8 to 60."],
+  ])("rejects invalid dashboard request %s before loading data", async (path, message) => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request(path)
+
+      expect(response.status).toBe(400)
+      expect(JSON.parse(response.body)).toEqual({ message })
+      expect(fixture.calls.dashboards).toHaveLength(0)
+      expect(fixture.calls.publicDashboards).toHaveLength(0)
+    })
+  })
+
   it("loads public username dashboards when OAuth is not configured", async () => {
     await withFixture(async (fixture) => {
       const response = await fixture.request("/api/dashboard/jskoiz")
 
       expect(response.status).toBe(200)
       expect(header(response, "x-gcc-auth")).toBe("public")
-      expect(JSON.parse(response.body)).toEqual({ ok: true, username: "jskoiz" })
+      expect(JSON.parse(response.body)).toEqual(DASHBOARD_PAYLOAD)
       expect(fixture.calls.publicDashboards).toHaveLength(1)
       expect(fixture.calls.dashboards).toHaveLength(0)
     }, { clientId: "", clientSecret: "" })
@@ -772,17 +817,18 @@ describe("hosted request handler", () => {
 
   it("loads quick dashboards with the token auth context", async () => {
     await withFixture(async (fixture) => {
+      const session = createSession({ id: "quick-dashboard-session" })
       const response = await fixture.request("/api/dashboard?quick=1", {
-        headers: { Cookie: sessionCookieHeader(fixture.sessionKey) },
+        headers: { Cookie: sessionCookieHeader(fixture.sessionKey, session) },
       })
 
       expect(response.status).toBe(200)
-      expect(JSON.parse(response.body)).toEqual({ ok: true })
+      expect(JSON.parse(response.body)).toEqual(DASHBOARD_PAYLOAD)
       expect(fixture.calls.dashboards).toEqual([{
         force: false,
         quick: true,
         scanLimit: 24,
-        auth: { token: "gho_token", userKey: "jskoiz" },
+        auth: { token: "gho_token", sessionId: session.id },
       }])
     })
   })

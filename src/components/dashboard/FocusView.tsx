@@ -1,4 +1,5 @@
 import { useState } from "react"
+import type { ReactNode } from "react"
 import {
   CircleDotIcon,
   ExternalLinkIcon,
@@ -8,9 +9,7 @@ import {
   GitPullRequestIcon,
   XIcon,
 } from "lucide-react"
-import type { ReactNode } from "react"
 
-import type { RepoScope } from "@/App"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -26,6 +25,7 @@ import { StatusBadge } from "./StatusBadge"
 
 type PullRequestStateFilter = "all" | "open" | "draft" | "closed"
 type IssueStateFilter = "all" | "open" | "closed"
+export type RepoScope = "active" | "all" | "hidden"
 
 function matchesPullRequestState(item: IssueSummary, filter: PullRequestStateFilter): boolean {
   if (filter === "all") return true
@@ -100,6 +100,7 @@ export function FocusView({
         count={scopedPullRequests.length}
         href="https://github.com/pulls"
         selectedRepo={selectedRepo}
+        viewerLogin={viewerLogin}
         filter={
           <StateFilterControl
             label="Filter pull requests by state"
@@ -120,10 +121,10 @@ export function FocusView({
         ) : scopedPullRequests.length === 0 ? (
           <FeedNote>
             No {prState === "all" ? "recent" : prState} pull requests
-            {selectedRepo ? ` in ${shortRepoName(selectedRepo)}` : ""}
+            {selectedRepo ? ` in ${shortRepoName(selectedRepo, viewerLogin)}` : ""}
           </FeedNote>
         ) : (
-          scopedPullRequests.map((item) => <FeedIssueRow key={item.id} item={item} icon={GitPullRequestIcon} />)
+          scopedPullRequests.map((item) => <FeedIssueRow key={item.id} item={item} icon={GitPullRequestIcon} viewerLogin={viewerLogin} />)
         )}
       </FeedCard>
       <div className="grid min-h-0 gap-3 lg:col-start-2 xl:col-start-3 xl:grid-rows-2">
@@ -133,6 +134,7 @@ export function FocusView({
           count={scopedIssues.length}
           href="https://github.com/issues"
           selectedRepo={selectedRepo}
+          viewerLogin={viewerLogin}
           filter={
             <StateFilterControl
               label="Filter issues by state"
@@ -152,10 +154,10 @@ export function FocusView({
           ) : scopedIssues.length === 0 ? (
             <FeedNote>
               No {issueState === "all" ? "recent" : issueState} issues
-              {selectedRepo ? ` in ${shortRepoName(selectedRepo)}` : ""}
+              {selectedRepo ? ` in ${shortRepoName(selectedRepo, viewerLogin)}` : ""}
             </FeedNote>
           ) : (
-            scopedIssues.map((item) => <FeedIssueRow key={item.id} item={item} icon={CircleDotIcon} />)
+            scopedIssues.map((item) => <FeedIssueRow key={item.id} item={item} icon={CircleDotIcon} viewerLogin={viewerLogin} />)
           )}
         </FeedCard>
         <FeedCard
@@ -164,14 +166,15 @@ export function FocusView({
           count={scopedCommits.length}
           href="https://github.com/dashboard-feed"
           selectedRepo={selectedRepo}
+          viewerLogin={viewerLogin}
           onClearRepo={() => onSelectRepo(null)}
         >
           {isUpdating && scopedCommits.length === 0 ? (
             <FeedNote>Updating details...</FeedNote>
           ) : scopedCommits.length === 0 ? (
-            <FeedNote>No recent commits{selectedRepo ? ` in ${shortRepoName(selectedRepo)}` : ""}</FeedNote>
+            <FeedNote>No recent commits{selectedRepo ? ` in ${shortRepoName(selectedRepo, viewerLogin)}` : ""}</FeedNote>
           ) : (
-            scopedCommits.map((commit) => <FeedCommitRow key={`${commit.repo}-${commit.sha}`} commit={commit} />)
+            scopedCommits.map((commit) => <FeedCommitRow key={`${commit.repo}-${commit.sha}`} commit={commit} viewerLogin={viewerLogin} />)
           )}
         </FeedCard>
       </div>
@@ -345,6 +348,7 @@ function FeedCard({
   count,
   href,
   selectedRepo,
+  viewerLogin,
   filter,
   onClearRepo,
   children,
@@ -354,6 +358,7 @@ function FeedCard({
   count: number
   href: string
   selectedRepo: string | null
+  viewerLogin: string
   filter?: ReactNode
   onClearRepo: () => void
   children: ReactNode
@@ -381,10 +386,10 @@ function FeedCard({
             <button
               type="button"
               onClick={onClearRepo}
-              title={`Stop filtering by ${shortRepoName(selectedRepo)}`}
+              title={`Stop filtering by ${shortRepoName(selectedRepo, viewerLogin)}`}
               className="flex min-w-0 items-center gap-1 rounded-md border bg-muted/40 px-1.5 py-0.5 text-[11px] font-normal text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
             >
-              <span className="truncate">{shortRepoName(selectedRepo)}</span>
+              <span className="truncate">{shortRepoName(selectedRepo, viewerLogin)}</span>
               <XIcon className="size-3 shrink-0" aria-hidden="true" />
             </button>
             ) : null}
@@ -401,9 +406,11 @@ function FeedCard({
 function FeedIssueRow({
   item,
   icon: Icon,
+  viewerLogin,
 }: {
   item: IssueSummary
   icon: typeof CircleDotIcon
+  viewerLogin: string
 }) {
   return (
     <a
@@ -416,7 +423,7 @@ function FeedIssueRow({
       <span className="min-w-0">
         <span className="block truncate font-medium leading-4">{item.title}</span>
         <span className="block truncate text-[11px] leading-4 text-muted-foreground">
-          {shortRepoName(item.repo)}#{item.number}
+          {shortRepoName(item.repo, viewerLogin)}#{item.number}
           {" · "}
           {item.isDraft && item.state === "open" ? (
             <span className="text-muted-foreground">Draft</span>
@@ -432,7 +439,7 @@ function FeedIssueRow({
   )
 }
 
-function FeedCommitRow({ commit }: { commit: CommitSummary }) {
+function FeedCommitRow({ commit, viewerLogin }: { commit: CommitSummary; viewerLogin: string }) {
   return (
     <a
       href={commit.url}
@@ -443,7 +450,7 @@ function FeedCommitRow({ commit }: { commit: CommitSummary }) {
       <span className="min-w-0">
         <span className="block truncate font-medium leading-4">{commit.message}</span>
         <span className="block truncate text-[11px] leading-4 text-muted-foreground">
-          {shortRepoName(commit.repo)} · {formatRelative(commit.date)}
+          {shortRepoName(commit.repo, viewerLogin)} · {formatRelative(commit.date)}
         </span>
       </span>
       <span className="font-mono text-[11px] leading-4 text-muted-foreground tabular-nums">

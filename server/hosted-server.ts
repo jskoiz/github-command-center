@@ -4,6 +4,13 @@ import { extname, join, normalize, parse, sep } from "node:path"
 
 import { isGithubRateLimitError, type GithubApiError } from "./github-client.ts"
 import {
+  DashboardRequestError,
+  parseDashboardRequest,
+  type DashboardLoader,
+  type DashboardRequestOptions,
+  type PublicDashboardLoader,
+} from "./dashboard-request.ts"
+import {
   openSession,
   parseCookies,
   sealSession,
@@ -55,18 +62,6 @@ type StaticFileStat = {
   isDirectory(): boolean
 }
 
-type DashboardLoaderOptions = {
-  force?: boolean
-  quick?: boolean
-  scanLimit?: number
-  auth?: {
-    token: string
-    userKey: string
-  }
-}
-
-type PublicDashboardLoaderOptions = Omit<DashboardLoaderOptions, "auth">
-
 type HostedLogger = Pick<Console, "error" | "warn">
 type AuthHeader = "oauth" | "public"
 
@@ -99,8 +94,8 @@ export type HostedServerDependencies = {
     token: string
   }): Promise<void>
   rateLimiters: HostedRateLimiters
-  loadDashboard(options: DashboardLoaderOptions): Promise<unknown>
-  loadPublicDashboard(username: string, options: PublicDashboardLoaderOptions): Promise<unknown>
+  loadDashboard: DashboardLoader
+  loadPublicDashboard: PublicDashboardLoader
   readFile(path: string): Promise<Buffer>
   stat(path: string): Promise<StaticFileStat>
   logger: HostedLogger
@@ -160,9 +155,21 @@ async function handleRequest(
   if (url.pathname === "/auth/login") return handleLogin(dependencies, baseUrl, req, res)
   if (url.pathname === "/auth/callback") return handleCallback(dependencies, baseUrl, req, res, url)
   if (url.pathname === "/auth/logout") return handleLogout(dependencies, req, res)
-  const publicDashboardUsername = publicDashboardUsernameFromPath(url.pathname)
-  if (publicDashboardUsername) return handlePublicDashboard(dependencies, req, res, url, publicDashboardUsername)
-  if (url.pathname === "/api/dashboard") return handleDashboard(dependencies, req, res, url)
+  if (isDashboardPath(url.pathname)) {
+    try {
+      const dashboardRequest = parseDashboardRequest(url, "/api/dashboard")
+      if (dashboardRequest.username) {
+        return handlePublicDashboard(dependencies, req, res, dashboardRequest.options, dashboardRequest.username)
+      }
+      return handleDashboard(dependencies, req, res, dashboardRequest.options)
+    } catch (error) {
+      if (error instanceof DashboardRequestError) {
+        sendJson(res, error.status, { message: error.message })
+        return
+      }
+      throw error
+    }
+  }
   if (url.pathname === "/healthz") {
     sendJson(res, 200, { ok: true })
     return
@@ -175,8 +182,11 @@ function isDashboardOrAuthPath(pathname: string) {
   return pathname === "/auth/login"
     || pathname === "/auth/callback"
     || pathname === "/auth/logout"
-    || pathname === "/api/dashboard"
-    || /^\/api\/dashboard\/[^/]+$/.test(pathname)
+    || isDashboardPath(pathname)
+}
+
+function isDashboardPath(pathname: string) {
+  return pathname === "/api/dashboard" || pathname.startsWith("/api/dashboard/")
 }
 
 function handleLogin(
@@ -309,7 +319,7 @@ async function handleDashboard(
   dependencies: HostedServerDependencies,
   req: IncomingMessage,
   res: ServerResponse,
-  url: URL
+  request: DashboardRequestOptions
 ) {
   const cookies = parseCookies(req.headers.cookie)
   const session = cookies[SESSION_COOKIE] ? openSession(cookies[SESSION_COOKIE], dependencies.sessionKey) : null
@@ -332,10 +342,8 @@ async function handleDashboard(
   }
 
   try {
-    const force = url.searchParams.get("refresh") === "1"
-    const quick = url.searchParams.get("quick") === "1"
-    const limit = dashboardRateLimiter(dependencies.rateLimiters, { force, quick }).check(
-      `${dashboardRateLimitPrefix({ force, quick })}:${session.login}`
+    const limit = dashboardRateLimiter(dependencies.rateLimiters, request).check(
+      `${dashboardRateLimitPrefix(request)}:${session.login}`
     )
     if (!limit.allowed) {
       sendRateLimit(res, limit, { authHeader: "oauth" })
@@ -343,10 +351,8 @@ async function handleDashboard(
     }
 
     const payload = await dependencies.loadDashboard({
-      force,
-      quick,
-      scanLimit: Number(url.searchParams.get("scanLimit") ?? 24),
-      auth: { token: session.token, userKey: session.login },
+      ...request,
+      auth: { token: session.token, sessionId: session.id },
     })
     res.setHeader("x-gcc-auth", "oauth")
     sendJson(res, 200, payload)
@@ -365,35 +371,28 @@ async function handlePublicDashboard(
   dependencies: HostedServerDependencies,
   req: IncomingMessage,
   res: ServerResponse,
-  url: URL,
+  request: DashboardRequestOptions,
   username: string
 ) {
   try {
-    const force = url.searchParams.get("refresh") === "1"
-    const quick = url.searchParams.get("quick") === "1"
-    const requestKind = { force, quick }
     const remoteAddress = remoteAddressBucket(req, dependencies.trustProxy ?? false)
-    const clientLimit = publicClientDashboardRateLimiter(dependencies.rateLimiters, requestKind).check(
-      `${dashboardRateLimitPrefix(requestKind)}:public-client:${remoteAddress}`
+    const clientLimit = publicClientDashboardRateLimiter(dependencies.rateLimiters, request).check(
+      `${dashboardRateLimitPrefix(request)}:public-client:${remoteAddress}`
     )
     if (!clientLimit.allowed) {
       sendRateLimit(res, clientLimit, { authHeader: "public" })
       return
     }
 
-    const limit = dashboardRateLimiter(dependencies.rateLimiters, requestKind).check(
-      `${dashboardRateLimitPrefix(requestKind)}:public:${username.toLowerCase()}:${remoteAddress}`
+    const limit = dashboardRateLimiter(dependencies.rateLimiters, request).check(
+      `${dashboardRateLimitPrefix(request)}:public:${username.toLowerCase()}:${remoteAddress}`
     )
     if (!limit.allowed) {
       sendRateLimit(res, limit, { authHeader: "public" })
       return
     }
 
-    const payload = await dependencies.loadPublicDashboard(username, {
-      force,
-      quick,
-      scanLimit: Number(url.searchParams.get("scanLimit") ?? 24),
-    })
+    const payload = await dependencies.loadPublicDashboard(username, request)
     res.setHeader("x-gcc-auth", "public")
     sendJson(res, 200, payload)
   } catch (error) {
@@ -413,11 +412,6 @@ async function handlePublicDashboard(
     dependencies.logger.error("Public dashboard request failed:", error)
     sendJson(res, 500, { message: "Public dashboard request failed. Try again shortly." })
   }
-}
-
-function publicDashboardUsernameFromPath(pathname: string): string | null {
-  const match = pathname.match(/^\/api\/dashboard\/([^/?#]+)$/)
-  return match ? decodeURIComponent(match[1]) : null
 }
 
 function remoteAddressBucket(req: IncomingMessage, trustProxy: boolean) {

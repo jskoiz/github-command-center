@@ -1,7 +1,7 @@
 import type { BillingSummary, DashboardPayload, Viewer } from "@/types/github"
 
 const DASHBOARD_CACHE_KEY_PREFIX = "github-command-center:dashboard-cache:v4"
-export const DASHBOARD_CACHE_MAX_AGE_MS = 10 * 60 * 1000
+const DASHBOARD_CACHE_MAX_AGE_MS = 10 * 60 * 1000
 
 export type DashboardCacheEntry = {
   cachedAt: number

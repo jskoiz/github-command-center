@@ -4,6 +4,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
 import { createPublicExecutor, createTokenExecutor, isPaginationLimitError, type GhExecutor } from "./github-client.ts"
+import {
+  normalizeGithubLogin,
+  type DashboardLoaderOptions,
+  type PublicDashboardLoaderOptions,
+} from "./dashboard-request.ts"
 import type {
   BillingRepoSummary,
   BillingSkuSummary,
@@ -199,23 +204,11 @@ type RepoDetailsCacheFile = {
   repos: Record<string, RepoDetailsCacheEntry>
 }
 
-export type DashboardAuth = {
-  token: string
-  userKey: string
-}
-
-const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
-
-export async function getGithubDashboard(options: {
-  force?: boolean
-  quick?: boolean
-  scanLimit?: number
-  auth?: DashboardAuth
-} = {}): Promise<DashboardPayload> {
+export async function getGithubDashboard(options: DashboardLoaderOptions = {}): Promise<DashboardPayload> {
   if (options.auth) {
     const context: AuthContext = {
       executor: createTokenExecutor(options.auth.token),
-      cacheKey: `user:${options.auth.userKey}`,
+      cacheKey: `session:${options.auth.sessionId}`,
     }
     return authContext.run(context, () => getGithubDashboardInner(options))
   }
@@ -224,11 +217,7 @@ export async function getGithubDashboard(options: {
 
 export async function getPublicGithubDashboard(
   username: string,
-  options: {
-    force?: boolean
-    quick?: boolean
-    scanLimit?: number
-  } = {}
+  options: PublicDashboardLoaderOptions = {}
 ): Promise<DashboardPayload> {
   const login = normalizeGithubLogin(username)
   const context: AuthContext = {
@@ -241,16 +230,6 @@ export async function getPublicGithubDashboard(
 
 function publicGithubToken(): string | null {
   return process.env.GITHUB_PUBLIC_TOKEN || null
-}
-
-function normalizeGithubLogin(username: string): string {
-  const login = username.trim()
-  if (!GITHUB_LOGIN_PATTERN.test(login)) {
-    const error = new Error("Invalid GitHub username.") as Error & { status: number }
-    error.status = 400
-    throw error
-  }
-  return login
 }
 
 async function getGithubDashboardInner(options: {
@@ -548,16 +527,17 @@ async function getPerRepoLatestDetails(
 
   await mapLimit(repos, 4, async (repo) => {
     const cached = cache.repos[repo.fullName]
+    const freshCached = cached && now - cached.refreshedAt < REPO_DETAILS_CACHE_MS ? cached : null
     const activityAt = getRepoActivityAt(repo)
 
     if (!refreshRepoNames.has(repo.fullName)) {
       if (isRecentlyActive(activityAt, now)) activeReposOutsideRefreshScope += 1
-      detailsByRepo.set(repo.fullName, cached ? toRepoLatestDetails(cached) : emptyRepoLatestDetails())
+      detailsByRepo.set(repo.fullName, freshCached ? toRepoLatestDetails(freshCached) : emptyRepoLatestDetails())
       return
     }
 
-    if (cached && now - cached.refreshedAt < REPO_DETAILS_CACHE_MS) {
-      detailsByRepo.set(repo.fullName, toRepoLatestDetails(cached))
+    if (freshCached) {
+      detailsByRepo.set(repo.fullName, toRepoLatestDetails(freshCached))
       return
     }
 

@@ -11,7 +11,6 @@ export type RateLimitOptions = {
 
 export type RateLimiter = {
   check(key: string): RateLimitResult
-  bucketCount(): number
 }
 
 export type HostedRateLimiters = {
@@ -30,9 +29,9 @@ type Bucket = {
 }
 
 const MINUTE_MS = 60 * 1000
-export const DEFAULT_MAX_RATE_LIMIT_BUCKETS = 10_000
+const DEFAULT_MAX_RATE_LIMIT_BUCKETS = 10_000
 
-export const HOSTED_RATE_LIMITS = {
+const HOSTED_RATE_LIMITS = {
   auth: { limit: 20, windowMs: 10 * MINUTE_MS },
   quickDashboard: { limit: 30, windowMs: MINUTE_MS },
   fullDashboard: { limit: 6, windowMs: MINUTE_MS },
@@ -56,9 +55,11 @@ export function createRateLimiter({
   return {
     check(key) {
       const currentTime = now()
-      pruneExpiredBuckets(buckets, currentTime)
-
-      const existing = buckets.get(key)
+      let existing = buckets.get(key)
+      if (existing && existing.resetAt <= currentTime) {
+        buckets.delete(key)
+        existing = undefined
+      }
       if (!existing) {
         evictOldestBucketAtCapacity(buckets, maxBuckets)
         buckets.set(key, { count: 1, resetAt: currentTime + windowMs })
@@ -74,9 +75,6 @@ export function createRateLimiter({
 
       existing.count += 1
       return { allowed: true }
-    },
-    bucketCount() {
-      return buckets.size
     },
   }
 }
@@ -97,10 +95,4 @@ function evictOldestBucketAtCapacity(buckets: Map<string, Bucket>, maxBuckets: n
   if (buckets.size < maxBuckets) return
   const oldest = buckets.keys().next().value
   if (oldest !== undefined) buckets.delete(oldest)
-}
-
-function pruneExpiredBuckets(buckets: Map<string, Bucket>, now: number) {
-  for (const [key, bucket] of buckets) {
-    if (bucket.resetAt <= now) buckets.delete(key)
-  }
 }
