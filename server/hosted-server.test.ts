@@ -23,6 +23,7 @@ import {
   type RateLimitOptions,
 } from "./rate-limit.ts"
 import { deriveSessionKey, openSession, sealSession, type Session } from "./session.ts"
+import type { DashboardPayload } from "../src/types/github.ts"
 
 type OAuthExchangeOptions = Parameters<HostedServerDependencies["exchangeOAuthCode"]>[0]
 type OAuthRevocationOptions = Parameters<HostedServerDependencies["revokeOAuthToken"]>[0]
@@ -74,6 +75,34 @@ type Fixture = {
 
 const BASE_URL = "http://127.0.0.1"
 const DIST_DIR = "/tmp/github-command-center-dist"
+const DASHBOARD_PAYLOAD: DashboardPayload = {
+  generatedAt: "2026-07-12T00:00:00.000Z",
+  detailLevel: "quick",
+  scanLimit: 24,
+  viewer: {
+    login: "jskoiz",
+    name: "saburo",
+    avatarUrl: "https://example.com/avatar.png",
+    profileUrl: "https://github.com/jskoiz",
+  },
+  repos: [],
+  recentCommits: [],
+  pullRequests: [],
+  issues: [],
+  ciRuns: [],
+  billing: {
+    available: false,
+    year: 2026,
+    month: 7,
+    grossAmount: 0,
+    discountAmount: 0,
+    netAmount: 0,
+    unitTotals: [],
+    skus: [],
+    repositories: [],
+  },
+  warnings: [],
+}
 let sessionCounter = 0
 
 afterEach(() => {
@@ -116,11 +145,11 @@ async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
     rateLimiters: options.rateLimiters ?? createHostedRateLimiters(),
     loadDashboard: options.loadDashboard ?? (async (dashboardOptions) => {
       calls.dashboards.push(dashboardOptions)
-      return { ok: true }
+      return DASHBOARD_PAYLOAD
     }),
     loadPublicDashboard: options.loadPublicDashboard ?? (async (username, dashboardOptions) => {
       calls.publicDashboards.push({ username, options: dashboardOptions })
-      return { ok: true, username }
+      return DASHBOARD_PAYLOAD
     }),
     readFile: async (path) => {
       calls.staticReads.push(path)
@@ -244,6 +273,9 @@ function testRateLimiters(
     quickDashboard: createRateLimiter(overrides.quickDashboard ?? defaults),
     fullDashboard: createRateLimiter(overrides.fullDashboard ?? defaults),
     refreshDashboard: createRateLimiter(overrides.refreshDashboard ?? defaults),
+    publicClientQuickDashboard: createRateLimiter(overrides.publicClientQuickDashboard ?? defaults),
+    publicClientFullDashboard: createRateLimiter(overrides.publicClientFullDashboard ?? defaults),
+    publicClientRefreshDashboard: createRateLimiter(overrides.publicClientRefreshDashboard ?? defaults),
   }
 }
 
@@ -341,6 +373,65 @@ describe("hosted request handler", () => {
       expect(fixture.calls.staticReads).toEqual([`${DIST_DIR}/assets/app.js`])
     }, {
       readFile: async () => Buffer.from("console.log('ok')"),
+    })
+  })
+
+  it("serves static HEAD metadata without reading the file and leaves GET unchanged", async () => {
+    await withFixture(async (fixture) => {
+      const head = await fixture.request("/assets/app.js", { method: "HEAD" })
+
+      expect(head.status).toBe(200)
+      expect(head.body).toBe("")
+      expect(header(head, "content-type")).toBe("text/javascript; charset=utf-8")
+      expect(header(head, "cache-control")).toBe("public, max-age=31536000, immutable")
+      expect(fixture.calls.staticStats).toEqual([`${DIST_DIR}/assets/app.js`])
+      expect(fixture.calls.staticReads).toEqual([])
+
+      const get = await fixture.request("/assets/app.js")
+
+      expect(get.status).toBe(200)
+      expect(get.body).toBe("console.log('ok')")
+      expect(header(get, "content-type")).toBe(header(head, "content-type"))
+      expect(header(get, "cache-control")).toBe(header(head, "cache-control"))
+      expect(fixture.calls.staticReads).toEqual([`${DIST_DIR}/assets/app.js`])
+    }, {
+      readFile: async () => Buffer.from("console.log('ok')"),
+    })
+  })
+
+  it("returns 404 for static HEAD when the SPA fallback is absent", async () => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/missing", { method: "HEAD" })
+
+      expect(response.status).toBe(404)
+      expect(response.body).toBe("")
+      expect(fixture.calls.staticStats).toEqual([
+        `${DIST_DIR}/missing`,
+        `${DIST_DIR}/index.html`,
+      ])
+      expect(fixture.calls.staticReads).toEqual([])
+    }, {
+      stat: async () => {
+        throw new Error("not found")
+      },
+    })
+  })
+
+  it("verifies directory indexes for static HEAD without reading them", async () => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request("/docs", { method: "HEAD" })
+
+      expect(response.status).toBe(200)
+      expect(response.body).toBe("")
+      expect(header(response, "content-type")).toBe("text/html; charset=utf-8")
+      expect(header(response, "cache-control")).toBe("no-cache")
+      expect(fixture.calls.staticStats).toEqual([
+        `${DIST_DIR}/docs`,
+        `${DIST_DIR}/docs/index.html`,
+      ])
+      expect(fixture.calls.staticReads).toEqual([])
+    }, {
+      stat: async (path) => ({ isDirectory: () => path.endsWith("/docs") }),
     })
   })
 
@@ -558,7 +649,7 @@ describe("hosted request handler", () => {
 
       expect(response.status).toBe(200)
       expect(header(response, "x-gcc-auth")).toBe("public")
-      expect(JSON.parse(response.body)).toEqual({ ok: true, username: "jskoiz" })
+      expect(JSON.parse(response.body)).toEqual(DASHBOARD_PAYLOAD)
       expect(fixture.calls.publicDashboards).toEqual([{
         username: "jskoiz",
         options: {
@@ -571,13 +662,29 @@ describe("hosted request handler", () => {
     })
   })
 
+  it.each([
+    ["/api/dashboard/-invalid", "Invalid GitHub username."],
+    ["/api/dashboard/%", "Invalid GitHub username encoding."],
+    ["/api/dashboard?scanLimit=8.5", "scanLimit must be an integer from 8 to 60."],
+    ["/api/dashboard/jskoiz?scanLimit=61", "scanLimit must be an integer from 8 to 60."],
+  ])("rejects invalid dashboard request %s before loading data", async (path, message) => {
+    await withFixture(async (fixture) => {
+      const response = await fixture.request(path)
+
+      expect(response.status).toBe(400)
+      expect(JSON.parse(response.body)).toEqual({ message })
+      expect(fixture.calls.dashboards).toHaveLength(0)
+      expect(fixture.calls.publicDashboards).toHaveLength(0)
+    })
+  })
+
   it("loads public username dashboards when OAuth is not configured", async () => {
     await withFixture(async (fixture) => {
       const response = await fixture.request("/api/dashboard/jskoiz")
 
       expect(response.status).toBe(200)
       expect(header(response, "x-gcc-auth")).toBe("public")
-      expect(JSON.parse(response.body)).toEqual({ ok: true, username: "jskoiz" })
+      expect(JSON.parse(response.body)).toEqual(DASHBOARD_PAYLOAD)
       expect(fixture.calls.publicDashboards).toHaveLength(1)
       expect(fixture.calls.dashboards).toHaveLength(0)
     }, { clientId: "", clientSecret: "" })
@@ -599,6 +706,46 @@ describe("hosted request handler", () => {
       expect(JSON.parse(blocked.body)).toEqual(rateLimitPayload())
       expect(fixture.calls.publicDashboards).toHaveLength(1)
     }, { rateLimiters })
+  })
+
+  it("rate-limits rotating public usernames by remote client", async () => {
+    const rateLimiters = testRateLimiters({
+      publicClientFullDashboard: { limit: 1, windowMs: 60_000, now: () => 0 },
+    })
+
+    await withFixture(async (fixture) => {
+      const allowed = await fixture.request("/api/dashboard/jskoiz")
+      const blocked = await fixture.request("/api/dashboard/octocat")
+
+      expect(allowed.status).toBe(200)
+      expect(blocked.status).toBe(429)
+      expect(header(blocked, "x-gcc-auth")).toBe("public")
+      expect(header(blocked, "retry-after")).toBe("60")
+      expect(JSON.parse(blocked.body)).toEqual(rateLimitPayload())
+      expect(fixture.calls.publicDashboards).toEqual([{
+        username: "jskoiz",
+        options: { force: false, quick: false, scanLimit: 24 },
+      }])
+    }, { rateLimiters })
+  })
+
+  it("keeps public client allowances independent by trusted remote address", async () => {
+    const rateLimiters = testRateLimiters({
+      publicClientFullDashboard: { limit: 1, windowMs: 60_000, now: () => 0 },
+    })
+
+    await withFixture(async (fixture) => {
+      const first = await fixture.request("/api/dashboard/jskoiz", {
+        headers: { "X-Forwarded-For": "203.0.113.10" },
+      })
+      const second = await fixture.request("/api/dashboard/octocat", {
+        headers: { "X-Forwarded-For": "203.0.113.11" },
+      })
+
+      expect(first.status).toBe(200)
+      expect(second.status).toBe(200)
+      expect(fixture.calls.publicDashboards).toHaveLength(2)
+    }, { rateLimiters, trustProxy: true })
   })
 
   it("returns a GitHub quota recovery payload for public dashboards", async () => {
@@ -670,17 +817,18 @@ describe("hosted request handler", () => {
 
   it("loads quick dashboards with the token auth context", async () => {
     await withFixture(async (fixture) => {
+      const session = createSession({ id: "quick-dashboard-session" })
       const response = await fixture.request("/api/dashboard?quick=1", {
-        headers: { Cookie: sessionCookieHeader(fixture.sessionKey) },
+        headers: { Cookie: sessionCookieHeader(fixture.sessionKey, session) },
       })
 
       expect(response.status).toBe(200)
-      expect(JSON.parse(response.body)).toEqual({ ok: true })
+      expect(JSON.parse(response.body)).toEqual(DASHBOARD_PAYLOAD)
       expect(fixture.calls.dashboards).toEqual([{
         force: false,
         quick: true,
         scanLimit: 24,
-        auth: { token: "gho_token", userKey: "jskoiz" },
+        auth: { token: "gho_token", sessionId: session.id },
       }])
     })
   })
@@ -797,6 +945,48 @@ describe("hosted request handler", () => {
       expect(header(response, "allow")).toBe("GET, HEAD")
       expect(JSON.parse(response.body)).toEqual({ message: "Method not allowed." })
     })
+  })
+
+  it("rejects dashboard and auth HEAD requests before work or limiter consumption", async () => {
+    const rateLimiters = testRateLimiters({
+      auth: { limit: 1, windowMs: 60_000, now: () => 0 },
+      fullDashboard: { limit: 1, windowMs: 60_000, now: () => 0 },
+      publicClientFullDashboard: { limit: 1, windowMs: 60_000, now: () => 0 },
+    })
+
+    await withFixture(async (fixture) => {
+      const sessionCookie = sessionCookieHeader(fixture.sessionKey)
+      const headRequests = await Promise.all([
+        fixture.request("/auth/login", { method: "HEAD" }),
+        fixture.request("/auth/callback?code=code-123&state=known", {
+          method: "HEAD",
+          headers: { Cookie: `${STATE_COOKIE}=known` },
+        }),
+        fixture.request("/auth/logout", { method: "HEAD", headers: { Cookie: sessionCookie } }),
+        fixture.request("/api/dashboard", { method: "HEAD", headers: { Cookie: sessionCookie } }),
+        fixture.request("/api/dashboard/jskoiz", { method: "HEAD" }),
+      ])
+
+      for (const response of headRequests) {
+        expect(response.status).toBe(405)
+        expect(header(response, "allow")).toBe("GET")
+        expect(response.body).toBe("")
+      }
+      expect(fixture.calls.exchanges).toEqual([])
+      expect(fixture.calls.revocations).toEqual([])
+      expect(fixture.calls.dashboards).toEqual([])
+      expect(fixture.calls.publicDashboards).toEqual([])
+
+      const login = await fixture.request("/auth/login")
+      const dashboard = await fixture.request("/api/dashboard", { headers: { Cookie: sessionCookie } })
+      const publicDashboard = await fixture.request("/api/dashboard/jskoiz")
+
+      expect(login.status).toBe(302)
+      expect(dashboard.status).toBe(200)
+      expect(publicDashboard.status).toBe(200)
+      expect(fixture.calls.dashboards).toHaveLength(1)
+      expect(fixture.calls.publicDashboards).toHaveLength(1)
+    }, { rateLimiters })
   })
 
   it("sets security headers on every response", async () => {

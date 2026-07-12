@@ -5,6 +5,7 @@ export type RateLimitResult =
 export type RateLimitOptions = {
   limit: number
   windowMs: number
+  maxBuckets?: number
   now?: () => number
 }
 
@@ -17,6 +18,9 @@ export type HostedRateLimiters = {
   quickDashboard: RateLimiter
   fullDashboard: RateLimiter
   refreshDashboard: RateLimiter
+  publicClientQuickDashboard: RateLimiter
+  publicClientFullDashboard: RateLimiter
+  publicClientRefreshDashboard: RateLimiter
 }
 
 type Bucket = {
@@ -25,8 +29,9 @@ type Bucket = {
 }
 
 const MINUTE_MS = 60 * 1000
+const DEFAULT_MAX_RATE_LIMIT_BUCKETS = 10_000
 
-export const HOSTED_RATE_LIMITS = {
+const HOSTED_RATE_LIMITS = {
   auth: { limit: 20, windowMs: 10 * MINUTE_MS },
   quickDashboard: { limit: 30, windowMs: MINUTE_MS },
   fullDashboard: { limit: 6, windowMs: MINUTE_MS },
@@ -35,16 +40,28 @@ export const HOSTED_RATE_LIMITS = {
 
 export const RATE_LIMIT_MESSAGE = "Too many requests. Try again later."
 
-export function createRateLimiter({ limit, windowMs, now = Date.now }: RateLimitOptions): RateLimiter {
+export function createRateLimiter({
+  limit,
+  windowMs,
+  maxBuckets = DEFAULT_MAX_RATE_LIMIT_BUCKETS,
+  now = Date.now,
+}: RateLimitOptions): RateLimiter {
+  if (!Number.isInteger(maxBuckets) || maxBuckets < 1) {
+    throw new RangeError("maxBuckets must be a positive integer.")
+  }
+
   const buckets = new Map<string, Bucket>()
 
   return {
     check(key) {
       const currentTime = now()
-      pruneExpiredBuckets(buckets, currentTime)
-
-      const existing = buckets.get(key)
+      let existing = buckets.get(key)
+      if (existing && existing.resetAt <= currentTime) {
+        buckets.delete(key)
+        existing = undefined
+      }
       if (!existing) {
+        evictOldestBucketAtCapacity(buckets, maxBuckets)
         buckets.set(key, { count: 1, resetAt: currentTime + windowMs })
         return { allowed: true }
       }
@@ -68,11 +85,14 @@ export function createHostedRateLimiters(): HostedRateLimiters {
     quickDashboard: createRateLimiter(HOSTED_RATE_LIMITS.quickDashboard),
     fullDashboard: createRateLimiter(HOSTED_RATE_LIMITS.fullDashboard),
     refreshDashboard: createRateLimiter(HOSTED_RATE_LIMITS.refreshDashboard),
+    publicClientQuickDashboard: createRateLimiter(HOSTED_RATE_LIMITS.quickDashboard),
+    publicClientFullDashboard: createRateLimiter(HOSTED_RATE_LIMITS.fullDashboard),
+    publicClientRefreshDashboard: createRateLimiter(HOSTED_RATE_LIMITS.refreshDashboard),
   }
 }
 
-function pruneExpiredBuckets(buckets: Map<string, Bucket>, now: number) {
-  for (const [key, bucket] of buckets) {
-    if (bucket.resetAt <= now) buckets.delete(key)
-  }
+function evictOldestBucketAtCapacity(buckets: Map<string, Bucket>, maxBuckets: number) {
+  if (buckets.size < maxBuckets) return
+  const oldest = buckets.keys().next().value
+  if (oldest !== undefined) buckets.delete(oldest)
 }

@@ -175,6 +175,22 @@ describe("App dashboard cache auth", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it("stops showing detail updates when the full dashboard request fails", async () => {
+    window.history.replaceState(null, "", "/dashboard")
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(createPayload({ detailLevel: "quick" }), 200, "oauth"))
+      .mockResolvedValueOnce(jsonResponse({ message: "Full dashboard unavailable." }, 500, "oauth"))
+    vi.stubGlobal("fetch", fetchMock)
+
+    render(<App />)
+
+    expect(await screen.findByText("Dashboard failed")).toBeTruthy()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(screen.queryByText("Updating details...")).toBeNull()
+    expect(screen.queryByText("Workflow details updating")).toBeNull()
+    expect(screen.getByText("No recent pull requests")).toBeTruthy()
+  })
+
   it("loads username paths through the public dashboard API and cache", async () => {
     window.history.replaceState(null, "", "/jskoiz")
     const payload = createPayload({

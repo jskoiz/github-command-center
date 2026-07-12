@@ -4,6 +4,13 @@ import { extname, join, normalize, parse, sep } from "node:path"
 
 import { isGithubRateLimitError, type GithubApiError } from "./github-client.ts"
 import {
+  DashboardRequestError,
+  parseDashboardRequest,
+  type DashboardLoader,
+  type DashboardRequestOptions,
+  type PublicDashboardLoader,
+} from "./dashboard-request.ts"
+import {
   openSession,
   parseCookies,
   sealSession,
@@ -55,18 +62,6 @@ type StaticFileStat = {
   isDirectory(): boolean
 }
 
-type DashboardLoaderOptions = {
-  force?: boolean
-  quick?: boolean
-  scanLimit?: number
-  auth?: {
-    token: string
-    userKey: string
-  }
-}
-
-type PublicDashboardLoaderOptions = Omit<DashboardLoaderOptions, "auth">
-
 type HostedLogger = Pick<Console, "error" | "warn">
 type AuthHeader = "oauth" | "public"
 
@@ -99,8 +94,8 @@ export type HostedServerDependencies = {
     token: string
   }): Promise<void>
   rateLimiters: HostedRateLimiters
-  loadDashboard(options: DashboardLoaderOptions): Promise<unknown>
-  loadPublicDashboard(username: string, options: PublicDashboardLoaderOptions): Promise<unknown>
+  loadDashboard: DashboardLoader
+  loadPublicDashboard: PublicDashboardLoader
   readFile(path: string): Promise<Buffer>
   stat(path: string): Promise<StaticFileStat>
   logger: HostedLogger
@@ -151,18 +146,47 @@ async function handleRequest(
     return
   }
 
+  if (req.method === "HEAD" && isDashboardOrAuthPath(url.pathname)) {
+    res.setHeader("Allow", "GET")
+    sendJson(res, 405, { message: "Method not allowed." })
+    return
+  }
+
   if (url.pathname === "/auth/login") return handleLogin(dependencies, baseUrl, req, res)
   if (url.pathname === "/auth/callback") return handleCallback(dependencies, baseUrl, req, res, url)
   if (url.pathname === "/auth/logout") return handleLogout(dependencies, req, res)
-  const publicDashboardUsername = publicDashboardUsernameFromPath(url.pathname)
-  if (publicDashboardUsername) return handlePublicDashboard(dependencies, req, res, url, publicDashboardUsername)
-  if (url.pathname === "/api/dashboard") return handleDashboard(dependencies, req, res, url)
+  if (isDashboardPath(url.pathname)) {
+    try {
+      const dashboardRequest = parseDashboardRequest(url, "/api/dashboard")
+      if (dashboardRequest.username) {
+        return handlePublicDashboard(dependencies, req, res, dashboardRequest.options, dashboardRequest.username)
+      }
+      return handleDashboard(dependencies, req, res, dashboardRequest.options)
+    } catch (error) {
+      if (error instanceof DashboardRequestError) {
+        sendJson(res, error.status, { message: error.message })
+        return
+      }
+      throw error
+    }
+  }
   if (url.pathname === "/healthz") {
     sendJson(res, 200, { ok: true })
     return
   }
 
-  return serveStatic(dependencies, res, url.pathname)
+  return serveStatic(dependencies, res, url.pathname, req.method === "HEAD")
+}
+
+function isDashboardOrAuthPath(pathname: string) {
+  return pathname === "/auth/login"
+    || pathname === "/auth/callback"
+    || pathname === "/auth/logout"
+    || isDashboardPath(pathname)
+}
+
+function isDashboardPath(pathname: string) {
+  return pathname === "/api/dashboard" || pathname.startsWith("/api/dashboard/")
 }
 
 function handleLogin(
@@ -295,7 +319,7 @@ async function handleDashboard(
   dependencies: HostedServerDependencies,
   req: IncomingMessage,
   res: ServerResponse,
-  url: URL
+  request: DashboardRequestOptions
 ) {
   const cookies = parseCookies(req.headers.cookie)
   const session = cookies[SESSION_COOKIE] ? openSession(cookies[SESSION_COOKIE], dependencies.sessionKey) : null
@@ -318,10 +342,8 @@ async function handleDashboard(
   }
 
   try {
-    const force = url.searchParams.get("refresh") === "1"
-    const quick = url.searchParams.get("quick") === "1"
-    const limit = dashboardRateLimiter(dependencies.rateLimiters, { force, quick }).check(
-      `${dashboardRateLimitPrefix({ force, quick })}:${session.login}`
+    const limit = dashboardRateLimiter(dependencies.rateLimiters, request).check(
+      `${dashboardRateLimitPrefix(request)}:${session.login}`
     )
     if (!limit.allowed) {
       sendRateLimit(res, limit, { authHeader: "oauth" })
@@ -329,10 +351,8 @@ async function handleDashboard(
     }
 
     const payload = await dependencies.loadDashboard({
-      force,
-      quick,
-      scanLimit: Number(url.searchParams.get("scanLimit") ?? 24),
-      auth: { token: session.token, userKey: session.login },
+      ...request,
+      auth: { token: session.token, sessionId: session.id },
     })
     res.setHeader("x-gcc-auth", "oauth")
     sendJson(res, 200, payload)
@@ -351,25 +371,28 @@ async function handlePublicDashboard(
   dependencies: HostedServerDependencies,
   req: IncomingMessage,
   res: ServerResponse,
-  url: URL,
+  request: DashboardRequestOptions,
   username: string
 ) {
   try {
-    const force = url.searchParams.get("refresh") === "1"
-    const quick = url.searchParams.get("quick") === "1"
-    const limit = dashboardRateLimiter(dependencies.rateLimiters, { force, quick }).check(
-      `${dashboardRateLimitPrefix({ force, quick })}:public:${username.toLowerCase()}:${remoteAddressBucket(req, dependencies.trustProxy ?? false)}`
+    const remoteAddress = remoteAddressBucket(req, dependencies.trustProxy ?? false)
+    const clientLimit = publicClientDashboardRateLimiter(dependencies.rateLimiters, request).check(
+      `${dashboardRateLimitPrefix(request)}:public-client:${remoteAddress}`
+    )
+    if (!clientLimit.allowed) {
+      sendRateLimit(res, clientLimit, { authHeader: "public" })
+      return
+    }
+
+    const limit = dashboardRateLimiter(dependencies.rateLimiters, request).check(
+      `${dashboardRateLimitPrefix(request)}:public:${username.toLowerCase()}:${remoteAddress}`
     )
     if (!limit.allowed) {
       sendRateLimit(res, limit, { authHeader: "public" })
       return
     }
 
-    const payload = await dependencies.loadPublicDashboard(username, {
-      force,
-      quick,
-      scanLimit: Number(url.searchParams.get("scanLimit") ?? 24),
-    })
+    const payload = await dependencies.loadPublicDashboard(username, request)
     res.setHeader("x-gcc-auth", "public")
     sendJson(res, 200, payload)
   } catch (error) {
@@ -389,11 +412,6 @@ async function handlePublicDashboard(
     dependencies.logger.error("Public dashboard request failed:", error)
     sendJson(res, 500, { message: "Public dashboard request failed. Try again shortly." })
   }
-}
-
-function publicDashboardUsernameFromPath(pathname: string): string | null {
-  const match = pathname.match(/^\/api\/dashboard\/([^/?#]+)$/)
-  return match ? decodeURIComponent(match[1]) : null
 }
 
 function remoteAddressBucket(req: IncomingMessage, trustProxy: boolean) {
@@ -418,6 +436,15 @@ function dashboardRateLimiter(
   if (request.force) return rateLimiters.refreshDashboard
   if (request.quick) return rateLimiters.quickDashboard
   return rateLimiters.fullDashboard
+}
+
+function publicClientDashboardRateLimiter(
+  rateLimiters: HostedRateLimiters,
+  request: { force: boolean; quick: boolean }
+) {
+  if (request.force) return rateLimiters.publicClientRefreshDashboard
+  if (request.quick) return rateLimiters.publicClientQuickDashboard
+  return rateLimiters.publicClientFullDashboard
 }
 
 function dashboardRateLimitPrefix(request: { force: boolean; quick: boolean }) {
@@ -484,11 +511,17 @@ function sendExpiredSession(dependencies: HostedServerDependencies, res: ServerR
   )
 }
 
-async function serveStatic(dependencies: HostedServerDependencies, res: ServerResponse, pathname: string) {
+async function serveStatic(
+  dependencies: HostedServerDependencies,
+  res: ServerResponse,
+  pathname: string,
+  headOnly: boolean
+) {
   const staticRoot = normalizeStaticRoot(dependencies.distDir)
   const requested = pathname === "/" ? "/index.html" : pathname
   const safePath = normalize(requested).replace(/^(\.\.[/\\])+/, "")
   let filePath = join(staticRoot, safePath)
+  let finalPathVerified = false
   if (filePath !== staticRoot && !filePath.startsWith(staticRoot + sep)) {
     sendJson(res, 403, { message: "Forbidden." })
     return
@@ -497,23 +530,43 @@ async function serveStatic(dependencies: HostedServerDependencies, res: ServerRe
   try {
     const stats = await dependencies.stat(filePath)
     if (stats.isDirectory()) filePath = join(filePath, "index.html")
+    else finalPathVerified = true
   } catch {
     // SPA fallback: unknown paths render the app shell.
     filePath = join(staticRoot, "index.html")
   }
 
+  if (headOnly) {
+    if (!finalPathVerified) {
+      try {
+        await dependencies.stat(filePath)
+      } catch {
+        sendJson(res, 404, { message: "Not found. Run `npm run build` before starting the server." })
+        return
+      }
+    }
+    res.statusCode = 200
+    applyStaticRepresentationHeaders(res, filePath)
+    res.end()
+    return
+  }
+
   try {
     const body = await dependencies.readFile(filePath)
     res.statusCode = 200
-    res.setHeader("Content-Type", CONTENT_TYPES[extname(filePath)] ?? "application/octet-stream")
-    if (filePath.includes("/assets/")) {
-      res.setHeader("Cache-Control", "public, max-age=31536000, immutable")
-    } else {
-      res.setHeader("Cache-Control", "no-cache")
-    }
+    applyStaticRepresentationHeaders(res, filePath)
     res.end(body)
   } catch {
     sendJson(res, 404, { message: "Not found. Run `npm run build` before starting the server." })
+  }
+}
+
+function applyStaticRepresentationHeaders(res: ServerResponse, filePath: string) {
+  res.setHeader("Content-Type", CONTENT_TYPES[extname(filePath)] ?? "application/octet-stream")
+  if (filePath.includes("/assets/")) {
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable")
+  } else {
+    res.setHeader("Cache-Control", "no-cache")
   }
 }
 

@@ -1,5 +1,5 @@
 export type GithubStatusTone = "success" | "danger" | "warning" | "running" | "neutral"
-export type GithubStatusRollup = "success" | "failure" | "running" | "none"
+type GithubStatusRollup = "success" | "failure" | "running" | "none"
 export type GithubStatusInput = string | null | undefined
 
 export type GithubStatusClassification = {
@@ -102,10 +102,6 @@ export function classifyGithubStatus(
 
 export function isGithubStatusFailure(state: GithubStatusInput): boolean {
   return classifyGithubStatus(state).rollup === "failure"
-}
-
-export function isGithubStatusSuccess(state: GithubStatusInput): boolean {
-  return classifyGithubStatus(state).rollup === "success"
 }
 
 function normalizeGithubStatus(state: GithubStatusInput): string | null {

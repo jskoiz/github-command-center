@@ -19,17 +19,19 @@ import { StatusBadge } from "./StatusBadge"
 
 export function OperationalRail({
   billing,
-  detailLevel,
+  isUpdating,
   runs,
   warnings,
+  viewerLogin,
   dismissedRunIds,
   onDismissRun,
   onRestoreRuns,
 }: {
   billing: BillingSummary
-  detailLevel: "quick" | "full"
+  isUpdating: boolean
   runs: WorkflowRunSummary[]
   warnings: DashboardWarning[]
+  viewerLogin: string
   dismissedRunIds: Set<number>
   onDismissRun: (id: number) => void
   onRestoreRuns: () => void
@@ -41,7 +43,8 @@ export function OperationalRail({
       <WarningPanel warnings={warnings} />
       <CiCard
         runs={failingRuns}
-        isUpdating={detailLevel === "quick"}
+        isUpdating={isUpdating}
+        viewerLogin={viewerLogin}
         dismissedRunIds={dismissedRunIds}
         onDismissRun={onDismissRun}
         onRestoreRuns={onRestoreRuns}
@@ -181,12 +184,14 @@ function BillingCard({ billing }: { billing: BillingSummary }) {
 function CiCard({
   runs,
   isUpdating,
+  viewerLogin,
   dismissedRunIds,
   onDismissRun,
   onRestoreRuns,
 }: {
   runs: WorkflowRunSummary[]
   isUpdating: boolean
+  viewerLogin: string
   dismissedRunIds: Set<number>
   onDismissRun: (id: number) => void
   onRestoreRuns: () => void
@@ -236,7 +241,7 @@ function CiCard({
                   )}
                 </div>
                 <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-                  <span className="truncate">{shortRepoName(run.repo)} · {formatDuration(run.durationSeconds)}</span>
+                  <span className="truncate">{shortRepoName(run.repo, viewerLogin)} · {formatDuration(run.durationSeconds)}</span>
                   <span className="inline-flex items-center gap-1">
                     {formatRelative(run.createdAt)}
                     <ExternalLinkIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden="true" />

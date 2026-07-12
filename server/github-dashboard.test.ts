@@ -17,6 +17,8 @@ type GithubExecutorOptions = {
   graphqlPageSize?: number
   latestCommit?: unknown
   latestPullRequest?: unknown
+  latestCommitFailures?: unknown[]
+  latestPullRequestFailures?: unknown[]
   workflowRunsByRepo?: Record<string, unknown[]>
   workflowRunFailuresByRepo?: Record<string, unknown>
 }
@@ -28,11 +30,15 @@ function createGithubExecutor({
   graphqlPageSize,
   latestCommit = createRawCommit("Latest commit"),
   latestPullRequest = createRawPullRequest(),
+  latestCommitFailures = [],
+  latestPullRequestFailures = [],
   workflowRunsByRepo = {},
   workflowRunFailuresByRepo = {},
 }: GithubExecutorOptions = {}) {
   const calls: GhCall[] = []
   let graphqlPage = 0
+  let latestCommitAttempt = 0
+  let latestPullRequestAttempt = 0
   const executor = vi.fn(async (args: string[], endpoint: string) => {
     calls.push({ args, endpoint })
     await Promise.resolve()
@@ -87,10 +93,16 @@ function createGithubExecutor({
     }
 
     if (endpoint.endsWith("/commits?per_page=1")) {
+      const failure = latestCommitFailures[latestCommitAttempt]
+      latestCommitAttempt += 1
+      if (failure !== undefined) throw failure
       return JSON.stringify(latestCommit ? [latestCommit] : [])
     }
 
     if (endpoint.endsWith("/pulls?state=all&sort=updated&direction=desc&per_page=1")) {
+      const failure = latestPullRequestFailures[latestPullRequestAttempt]
+      latestPullRequestAttempt += 1
+      if (failure !== undefined) throw failure
       return JSON.stringify(latestPullRequest ? [latestPullRequest] : [])
     }
 
@@ -209,6 +221,34 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
   })
 }
 
+function createAuthenticatedDashboardFetch() {
+  return vi.fn(async (...[input, init]: [string | URL | Request, RequestInit?]) => {
+    await Promise.resolve()
+    const url = input.toString()
+    const headers = init?.headers as Record<string, string> | undefined
+    const token = headers?.Authorization?.replace(/^Bearer /, "") ?? "missing-token"
+
+    if (url.endsWith("/user")) {
+      return jsonResponse({
+        login: "jskoiz",
+        name: "saburo",
+        avatar_url: "https://example.com/avatar.png",
+        html_url: "https://github.com/jskoiz",
+      })
+    }
+    if (url.includes("/user/repos?")) {
+      const suffix = token === "token-a" ? "a" : "b"
+      return jsonResponse([createRawRepo({
+        id: suffix === "a" ? 1 : 2,
+        name: `repo-${suffix}`,
+        full_name: `jskoiz/repo-${suffix}`,
+        html_url: `https://github.com/jskoiz/repo-${suffix}`,
+      })])
+    }
+    throw new Error(`Unhandled fetch ${url}`)
+  })
+}
+
 function repoNameWithOwner(repo: unknown) {
   return typeof repo === "object" && repo !== null && "full_name" in repo
     ? String(repo.full_name)
@@ -223,6 +263,7 @@ const ORIGINAL_GITHUB_ENV = {
 
 afterEach(() => {
   configureGithubDashboardForTests(null)
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   restoreEnv("GITHUB_PUBLIC_TOKEN", ORIGINAL_GITHUB_ENV.GITHUB_PUBLIC_TOKEN)
   restoreEnv("GITHUB_TOKEN", ORIGINAL_GITHUB_ENV.GITHUB_TOKEN)
@@ -247,6 +288,49 @@ describe("getGithubDashboard request coalescing", () => {
     expect(calls.filter((call) => call.endpoint === "user")).toHaveLength(1)
     expect(calls.filter((call) => call.endpoint.startsWith("/user/repos?"))).toHaveLength(1)
     expect(calls.filter((call) => call.endpoint === "graphql")).toHaveLength(1)
+  })
+
+  it("shares simultaneous authenticated loads within one session", async () => {
+    const fetchMock = createAuthenticatedDashboardFetch()
+    vi.stubGlobal("fetch", fetchMock)
+    const options = {
+      force: true,
+      quick: true,
+      scanLimit: 8,
+      auth: { token: "token-a", sessionId: "session-a" },
+    }
+
+    const [firstPayload, secondPayload] = await Promise.all([
+      getGithubDashboard(options),
+      getGithubDashboard(options),
+    ])
+
+    expect(firstPayload).toBe(secondPayload)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it("isolates simultaneous authenticated loads for separate sessions of the same login", async () => {
+    const fetchMock = createAuthenticatedDashboardFetch()
+    vi.stubGlobal("fetch", fetchMock)
+
+    const [firstPayload, secondPayload] = await Promise.all([
+      getGithubDashboard({
+        force: true,
+        quick: true,
+        scanLimit: 8,
+        auth: { token: "token-a", sessionId: "session-a" },
+      }),
+      getGithubDashboard({
+        force: true,
+        quick: true,
+        scanLimit: 8,
+        auth: { token: "token-b", sessionId: "session-b" },
+      }),
+    ])
+
+    expect(firstPayload.repos[0]?.fullName).toBe("jskoiz/repo-a")
+    expect(secondPayload.repos[0]?.fullName).toBe("jskoiz/repo-b")
+    expect(fetchMock).toHaveBeenCalledTimes(4)
   })
 
   it("keeps quick mode bounded and skips billing when no full cache is available", async () => {
@@ -296,6 +380,136 @@ describe("getGithubDashboard request coalescing", () => {
 
     expect(calls.filter((call) => call.endpoint === "/repos/jskoiz/active-repo/commits?per_page=1")).toHaveLength(1)
     expect(calls.filter((call) => call.endpoint === "/repos/jskoiz/active-repo/pulls?state=all&sort=updated&direction=desc&per_page=1")).toHaveLength(1)
+  })
+
+  it("retries a one-sided repo-detail failure while preserving the successful field", async () => {
+    const secretError = "Commit request failed with token ghp_repo_detail_secret"
+    const { calls, executor } = createGithubExecutor({
+      repos: [createRawRepo()],
+      latestCommit: createRawCommit("Recovered commit"),
+      latestPullRequest: createRawPullRequest(),
+      latestCommitFailures: [new Error(secretError)],
+    })
+    configureGithubDashboardForTests(executor)
+
+    const partial = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const recovered = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const warningText = partial.warnings.map((warning) => warning.message).join("\n")
+
+    expect(partial.repos[0].latestCommit).toBeNull()
+    expect(partial.repos[0].latestPullRequest?.number).toBe(42)
+    expect(partial.warnings).toContainEqual({
+      area: "repo details",
+      message: "Latest commit or pull request refresh failed for 1 repositories.",
+    })
+    expect(warningText).not.toContain(secretError)
+    expect(warningText).not.toContain("ghp_repo_detail_secret")
+    expect(recovered.repos[0].latestCommit?.message).toBe("Recovered commit")
+    expect(recovered.repos[0].latestPullRequest?.number).toBe(42)
+    expect(calls.filter((call) => call.endpoint.endsWith("/commits?per_page=1"))).toHaveLength(2)
+    expect(calls.filter((call) => call.endpoint.endsWith("/pulls?state=all&sort=updated&direction=desc&per_page=1"))).toHaveLength(2)
+  })
+
+  it("retries two-sided repo-detail failures and recovers both fields", async () => {
+    const commitSecretError = "Commit request failed with token ghp_commit_secret"
+    const pullRequestSecretError = "Pull request failed with token ghp_pull_secret"
+    const { calls, executor } = createGithubExecutor({
+      repos: [createRawRepo()],
+      latestCommit: createRawCommit("Recovered commit"),
+      latestPullRequest: createRawPullRequest(),
+      latestCommitFailures: [new Error(commitSecretError)],
+      latestPullRequestFailures: [new Error(pullRequestSecretError)],
+    })
+    configureGithubDashboardForTests(executor)
+
+    const failed = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const recovered = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const warningText = failed.warnings.map((warning) => warning.message).join("\n")
+
+    expect(failed.repos[0].latestCommit).toBeNull()
+    expect(failed.repos[0].latestPullRequest).toBeNull()
+    expect(failed.warnings).toContainEqual({
+      area: "repo details",
+      message: "Latest commit or pull request refresh failed for 1 repositories.",
+    })
+    expect(warningText).not.toContain(commitSecretError)
+    expect(warningText).not.toContain(pullRequestSecretError)
+    expect(warningText).not.toContain("ghp_commit_secret")
+    expect(warningText).not.toContain("ghp_pull_secret")
+    expect(recovered.repos[0].latestCommit?.message).toBe("Recovered commit")
+    expect(recovered.repos[0].latestPullRequest?.number).toBe(42)
+    expect(calls.filter((call) => call.endpoint.endsWith("/commits?per_page=1"))).toHaveLength(2)
+    expect(calls.filter((call) => call.endpoint.endsWith("/pulls?state=all&sort=updated&direction=desc&per_page=1"))).toHaveLength(2)
+  })
+
+  it("bounds cold repo-detail fanout to the workflow scan set", async () => {
+    const activeAt = new Date().toISOString()
+    const repos = createRawRepos(10, { pushed_at: activeAt, updated_at: activeAt })
+    const { calls, executor } = createGithubExecutor({ repos })
+    configureGithubDashboardForTests(executor)
+
+    const payload = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const detailWarnings = payload.warnings.filter((warning) => warning.area === "repo details")
+
+    expect(payload.repos).toHaveLength(10)
+    expect(calls.filter((call) => call.endpoint.endsWith("/commits?per_page=1"))).toHaveLength(8)
+    expect(calls.filter((call) => call.endpoint.endsWith("/pulls?state=all&sort=updated&direction=desc&per_page=1"))).toHaveLength(8)
+    expect(detailWarnings).toContainEqual({
+      area: "repo details",
+      message: "Latest commit and pull request refresh is limited to 8 of 10 repositories; active repositories outside the live refresh scope: 2.",
+    })
+    expect(detailWarnings.map((warning) => warning.message).join("\n")).not.toContain("jskoiz/repo-")
+  })
+
+  it("preserves cached repo details outside a narrower refresh set", async () => {
+    const activeAt = new Date().toISOString()
+    const repos = createRawRepos(9, { pushed_at: activeAt, updated_at: activeAt })
+    const { calls, executor } = createGithubExecutor({
+      repos,
+      latestCommit: createRawCommit("Cached out-of-scope commit"),
+      latestPullRequest: createRawPullRequest(),
+    })
+    configureGithubDashboardForTests(executor)
+
+    await getGithubDashboard({ force: true, scanLimit: 9 })
+    const payload = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const outOfScopeRepo = payload.repos.find((repo) => repo.fullName === "jskoiz/repo-9")
+
+    expect(outOfScopeRepo?.latestCommit?.message).toBe("Cached out-of-scope commit")
+    expect(outOfScopeRepo?.latestPullRequest?.number).toBe(42)
+    expect(calls.filter((call) => call.endpoint.endsWith("/commits?per_page=1"))).toHaveLength(9)
+    expect(calls.filter((call) => call.endpoint.endsWith("/pulls?state=all&sort=updated&direction=desc&per_page=1"))).toHaveLength(9)
+    expect(payload.warnings).toContainEqual({
+      area: "repo details",
+      message: "Latest commit and pull request refresh is limited to 8 of 9 repositories; active repositories outside the live refresh scope: 1.",
+    })
+  })
+
+  it("clears expired cached repo details outside a narrower refresh set", async () => {
+    const now = Date.parse("2026-07-12T12:00:00Z")
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const activeAt = new Date().toISOString()
+    const repos = createRawRepos(9, { pushed_at: activeAt, updated_at: activeAt })
+    const { calls, executor } = createGithubExecutor({
+      repos,
+      latestCommit: createRawCommit("Expired out-of-scope commit"),
+      latestPullRequest: createRawPullRequest(),
+    })
+    configureGithubDashboardForTests(executor)
+
+    await getGithubDashboard({ force: true, scanLimit: 9 })
+    vi.setSystemTime(now + 24 * 60 * 60_000 + 1)
+    const payload = await getGithubDashboard({ force: true, scanLimit: 8 })
+    const outOfScopeRepo = payload.repos.find((repo) => repo.fullName === "jskoiz/repo-9")
+    const outOfScopeDetailCalls = calls.filter((call) => (
+      call.endpoint.includes("/repos/jskoiz/repo-9/")
+      && (call.endpoint.endsWith("/commits?per_page=1") || call.endpoint.includes("/pulls?state=all"))
+    ))
+
+    expect(outOfScopeRepo?.latestCommit).toBeNull()
+    expect(outOfScopeRepo?.latestPullRequest).toBeNull()
+    expect(outOfScopeDetailCalls).toHaveLength(2)
   })
 
   it("skips uncached per-repo detail pulls for inactive repos", async () => {

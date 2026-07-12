@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { classifyGithubStatus, isGithubStatusFailure, isGithubStatusSuccess } from "./github-status"
+import { classifyGithubStatus, isGithubStatusFailure } from "./github-status"
 
 describe("classifyGithubStatus", () => {
   it("classifies known CI statuses consistently", () => {
@@ -32,7 +32,6 @@ describe("classifyGithubStatus", () => {
         rollup: item.rollup,
       })
       expect(isGithubStatusFailure(item.state)).toBe(item.failure)
-      expect(isGithubStatusSuccess(item.state)).toBe(item.success)
     }
   })
 

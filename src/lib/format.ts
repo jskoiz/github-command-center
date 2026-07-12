@@ -9,12 +9,6 @@ const moneyFormatter = new Intl.NumberFormat("en", {
   currency: "USD",
   maximumFractionDigits: 2,
 })
-const dateTimeFormatter = new Intl.DateTimeFormat("en", {
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-})
 const monthFormatter = new Intl.DateTimeFormat("en", {
   month: "long",
   year: "numeric",
@@ -34,17 +28,12 @@ export function formatRelative(value: string | null): string {
   return relativeFormatter.format(Math.round(diffSeconds / 31_536_000), "year")
 }
 
-export function formatDateTime(value: string | null): string {
-  if (!value) return "Unknown"
-  return dateTimeFormatter.format(new Date(value))
-}
-
 export function formatNumber(value: number | null | undefined): string {
   if (value == null) return "-"
   return numberFormatter.format(value)
 }
 
-export function formatDecimal(value: number | null | undefined, maximumFractionDigits = 1): string {
+function formatDecimal(value: number | null | undefined, maximumFractionDigits = 1): string {
   if (value == null) return "-"
   return new Intl.NumberFormat("en", { maximumFractionDigits }).format(value)
 }
@@ -84,13 +73,7 @@ export function formatBillingQuantity(quantity: number, unitType: string | null)
   return `${formatDecimal(quantity, digits)} ${label}`
 }
 
-let viewerLoginPrefix: string | null = null
-
-export function setViewerLogin(login: string | null) {
-  viewerLoginPrefix = login
-}
-
-export function shortRepoName(fullName: string): string {
-  if (!viewerLoginPrefix) return fullName
-  return fullName.startsWith(`${viewerLoginPrefix}/`) ? fullName.slice(viewerLoginPrefix.length + 1) : fullName
+export function shortRepoName(fullName: string, viewerLogin: string | null): string {
+  if (!viewerLogin) return fullName
+  return fullName.startsWith(`${viewerLogin}/`) ? fullName.slice(viewerLogin.length + 1) : fullName
 }

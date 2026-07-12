@@ -68,9 +68,10 @@ function renderOperationalRail(warnings: DashboardWarning[]) {
   return render(
     <OperationalRail
       billing={billing}
-      detailLevel="full"
+      isUpdating={false}
       runs={[]}
       warnings={warnings}
+      viewerLogin="jskoiz"
       dismissedRunIds={new Set()}
       onDismissRun={() => {}}
       onRestoreRuns={() => {}}
