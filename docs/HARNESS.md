@@ -34,11 +34,39 @@ OAuth, billing, or deployment surfaces.
 npm run check
 ```
 
-The gate runs lint, Knip, both test projects, typechecking, the production Vite
-build, and `scripts/smoke-hosted.mjs`. The smoke script starts the built hosted
-server on a temporary loopback port, requires `{ "ok": true }` from `/healthz`,
-and terminates the child process. A passing gate should not leave a server
-running or modify tracked files.
+The gate runs lint, Knip, both test projects, typechecking, both standalone and
+public-Worker Vite builds, `scripts/smoke-hosted.mjs`, and a strict Wrangler
+dry-run. The smoke script
+starts the built standalone server on a temporary loopback port, requires
+`{ "ok": true }` from `/healthz`, and terminates the child process. The Wrangler
+step bundles the Cloudflare entry point and validates its asset/config contract
+without uploading. A passing gate should not leave a server running or modify
+tracked files.
+
+## Worker runtime and deployment
+
+Run the Cloudflare runtime locally after building:
+
+```sh
+npm run build
+npx wrangler dev --local --port 8787
+curl --fail http://127.0.0.1:8787/healthz
+curl --fail 'http://127.0.0.1:8787/api/dashboard/jskoiz?quick=1&scanLimit=8'
+```
+
+Deploy only after `npm run check` passes:
+
+```sh
+npm run deploy
+curl --fail https://github-command-center.jskoiz.workers.dev/healthz
+curl --fail 'https://github-command-center.jskoiz.workers.dev/api/dashboard/jskoiz?quick=1&scanLimit=8'
+npx wrangler deployments list
+```
+
+`npm run deploy` runs the public-only Worker build before upload. The first two
+live requests prove the public HTTPS surface; the deployments list
+proves Cloudflare's active version record. A successful upload alone is not live
+proof. Do not place `gh` credentials or OAuth secrets in `wrangler.jsonc`.
 
 ## Dependency changes
 
@@ -50,8 +78,9 @@ git diff -- package.json package-lock.json
 ```
 
 Knip is mandatory. Prefer removing dead code over adding ignore entries. The
-only allowed dependency ignores are stylesheet packages that Knip cannot see;
-remove an ignore when its stylesheet import disappears.
+only allowed dependency ignores are platform virtual modules such as
+`cloudflare:node`, which has no installable package, and stylesheet packages
+that Knip cannot see. Remove an ignore when its corresponding import disappears.
 
 ## Hosted smoke
 

@@ -3,6 +3,9 @@
 A focused GitHub homepage for pull requests, issues, commits, CI failures, and
 Actions billing across all your repositories.
 
+The public deployment is live at
+[github-command-center.jskoiz.workers.dev](https://github-command-center.jskoiz.workers.dev).
+
 The root page opens public dashboards at `/username`, a fixture-backed tour at
 `/demo`, or the private dashboard at `/dashboard`. Hidden repositories and
 dismissed workflow failures persist in the browser.
@@ -12,8 +15,8 @@ dismissed workflow failures persist in the browser.
 | Mode | Authentication | Best for |
 | --- | --- | --- |
 | Local Vite | Authenticated GitHub CLI | Personal use on one machine |
-| Hosted public | None for `/username` | Shareable public profiles |
-| Hosted OAuth | GitHub OAuth | Private repositories and billing |
+| Hosted public | None for `/username` | The live Cloudflare deployment |
+| Standalone hosted OAuth | GitHub OAuth | Private repositories and billing |
 
 The project supports Node.js 24 LTS only. `.nvmrc` and the Docker image pin the
 same runtime.
@@ -41,11 +44,30 @@ The local API accepts loopback requests only. Vite does not load unprefixed
 GH_BIN=/absolute/path/to/gh npm run dev
 ```
 
-## Hosted mode
+## Hosted modes
 
-`server/main.ts` serves the built client and hosted APIs. Public `/username`
-routes use public GitHub REST data without login. Set `GITHUB_PUBLIC_TOKEN` to
-raise GitHub's anonymous quota without exposing the token to visitors.
+Public `/username` routes use public GitHub REST data without login. The live
+Cloudflare Worker is intentionally public-only: `/demo` and `/username` work,
+while `/dashboard` reports that OAuth is unavailable. It uses GitHub's anonymous
+REST quota and never uploads the local `gh` token.
+
+Build, verify, and deploy the public Worker:
+
+```sh
+nvm use
+npm ci
+npm run check
+npm run deploy
+curl --fail https://github-command-center.jskoiz.workers.dev/healthz
+```
+
+`wrangler.jsonc` is the deployment source of truth. `npm run build:worker`
+produces public-only homepage copy, `server/worker.ts` routes dynamic requests
+through the shared Node HTTP server, and Cloudflare serves the Vite build with
+the headers in `public/_headers`.
+
+The standalone Node server supports optional OAuth. Set `GITHUB_PUBLIC_TOKEN`
+to raise GitHub's anonymous quota without exposing the token to visitors.
 
 OAuth is optional. It enables `/dashboard`, private repository metadata,
 GraphQL-only rollups, workflow runs, and Actions billing. Create a GitHub OAuth
@@ -62,7 +84,8 @@ SESSION_SECRET=... # openssl rand -hex 32
 
 `npm start` loads `.env` when it exists. Process environment variables take
 precedence. OAuth deployments must use HTTPS; hosted tokens are stored in an
-encrypted, httpOnly cookie.
+encrypted, httpOnly cookie. Do not add OAuth secrets to `wrangler.jsonc`; the
+public Worker does not accept OAuth sessions.
 
 Build and start:
 

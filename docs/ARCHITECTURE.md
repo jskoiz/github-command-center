@@ -9,13 +9,16 @@ legacy aliases or parallel response shapes.
 | Surface | Runtime | Identity | GitHub access |
 | --- | --- | --- | --- |
 | `/demo` | Browser | None | Static fixture data |
-| `/username` | Hosted or local | Public username | Public REST token or anonymous REST |
+| `/username` | Cloudflare Worker, standalone Node, or local | Public username | Public REST token or anonymous REST |
 | `/dashboard` in Vite | Local Node middleware | Authenticated `gh` user | `gh api` |
-| `/dashboard` hosted | Hosted Node server | Encrypted OAuth session | User OAuth token |
+| `/dashboard` standalone hosted | Hosted Node server | Encrypted OAuth session | User OAuth token |
+| `/dashboard` on the public Worker | Cloudflare Worker | Disabled | None |
 
-Vite owns development and preview middleware only. `server/main.ts` serves the
-production build, OAuth routes, hosted dashboard APIs, static assets, and
-`/healthz`.
+Vite owns development and preview middleware only. `server/app-server.ts` wires
+the shared Node HTTP application. `server/main.ts` adds standalone filesystem
+assets and process startup. `server/worker.ts` exposes the same dynamic handler
+through Cloudflare's Node compatibility layer while Cloudflare Assets serves the
+Vite build.
 
 ## Ownership and dependency direction
 
@@ -23,6 +26,8 @@ production build, OAuth routes, hosted dashboard APIs, static assets, and
 - `src/components/` contains reusable presentation components.
 - `src/lib/` contains browser persistence, formatting, route, and status logic.
 - `server/hosted-server.ts` owns HTTP routing and response policy.
+- `server/app-server.ts` owns hosted dependency wiring shared by both runtimes.
+- `server/worker.ts` owns Cloudflare's public-only runtime boundary.
 - `server/dashboard-request.ts` owns dashboard request parsing shared by local
   and hosted adapters.
 - `server/github-dashboard.ts` owns aggregation, bounded fanout, caching, and
@@ -51,23 +56,30 @@ input once, then call the dashboard service with the canonical option shape.
 - Local dashboard APIs accept loopback requests only.
 - Public profile requests use only an explicit `GITHUB_PUBLIC_TOKEN` or GitHub's
   anonymous quota; they never reuse local CLI or OAuth credentials.
-- Hosted OAuth tokens live inside encrypted, httpOnly session cookies. Logout
+- Standalone hosted OAuth tokens live inside encrypted, httpOnly session cookies. Logout
   revokes the local session and attempts upstream token revocation.
+- The public Worker never accepts OAuth sessions or the local `gh` token.
 - `TRUST_PROXY` is opt-in. Forwarded client addresses are ignored otherwise.
 - Server secrets are read from the process environment and never exposed through
   Vite client environment variables.
 
 ## Deployment
 
-The production image builds the client, then copies only `dist/`, `server/`, the
-shared types, and `package.json` into a dependency-free Node runtime image. Node
-executes the TypeScript server using its built-in type stripping. `/healthz` is
-the readiness and container-health contract.
+The canonical public deployment is the Cloudflare Worker configured by
+`wrangler.jsonc`. Dynamic API, auth-unavailable, and health requests run through
+the shared Node HTTP handler. Static assets are uploaded from `dist/`; SPA
+routing and response headers are owned by the Cloudflare Assets configuration
+and `public/_headers`.
+
+The Docker image remains the standalone OAuth-capable deployment. It copies only
+`dist/`, `server/`, the shared types, and `package.json` into a dependency-free
+Node runtime image. `/healthz` is the readiness contract in both deployments.
 
 ## Deliberate non-goals and migration triggers
 
-- No database or distributed session/cache layer while deployment remains a
-  single process. Add one only when multiple replicas require shared state.
+- No distributed session/cache layer. The public Worker is stateless with
+  best-effort isolate-local caches and rate limits. Add shared state before
+  enabling OAuth or any correctness requirement across Worker isolates.
 - No compatibility routes, duplicated payload fields, or dual parsers. Change
   the canonical contract and all consumers together.
 - No background queue until request work cannot remain bounded within the
